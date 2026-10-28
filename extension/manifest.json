@@ -1,0 +1,32 @@
+
+{
+  "manifest_version": 3,
+  "name": "StudyTrack",
+  "version": "0.6.0",
+  "description": "Track study time and save learning notes.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "contextMenus",
+    "tabs",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "content.js",
+        "study-prompt.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "StudyTrack",
+    "default_popup": "popup.html"
+  }
+}

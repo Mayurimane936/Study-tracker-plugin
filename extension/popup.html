@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StudyTrack</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div>
+        <h1>StudyTrack</h1>
+        <p class="subtitle">Your personal study companion</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>Automatic website tracking</h2>
+
+      <p id="autoStatus" class="status">
+        Checking active website...
+      </p>
+
+      <p class="muted">
+        Time is counted automatically when a configured study website is active
+        in a focused browser window. Switching away pauses tracking.
+      </p>
+
+      <h3>Your study websites</h3>
+
+      <ul id="sitesList" class="list">
+        <li class="empty">Loading configured study websites...</li>
+      </ul>
+
+      <!-- Hidden compatibility elements for the existing popup.js -->
+      <div hidden aria-hidden="true">
+        <label for="siteDomain">Website domain</label>
+        <input id="siteDomain" type="text" autocomplete="url">
+
+        <label for="siteSubject">Study topic</label>
+        <select id="siteSubject"></select>
+
+        <button id="addSiteBtn" type="button">Add website</button>
+
+        <p id="siteStatus" class="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Manual study timer</h2>
+
+      <label for="subject">Study topic</label>
+
+      <select id="subject">
+        <option value="DSA">DSA</option>
+        <option value="C++">C++</option>
+        <option value="System Design">System Design</option>
+        <option value="Other">Other</option>
+      </select>
+
+      <div id="timer" class="timer">00:00:00</div>
+
+      <p id="timerStatus" class="status">Ready to study?</p>
+
+      <div class="button-row">
+        <button id="startBtn" class="primary">Start</button>
+        <button id="pauseBtn" class="secondary" disabled>Pause</button>
+        <button id="stopBtn" class="danger" disabled>Stop</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Quick notes</h2>
+
+      <button id="captureBtn" class="secondary full-width">
+        Capture selected webpage text
+      </button>
+
+      <label for="noteTitle">Note title (optional)</label>
+
+      <input
+        id="noteTitle"
+        type="text"
+        placeholder="e.g. Binary search"
+      >
+
+      <label for="noteText">Note text</label>
+
+      <textarea
+        id="noteText"
+        rows="4"
+        placeholder="Write or capture your notes..."
+      ></textarea>
+
+      <label for="noteSubject">Topic</label>
+
+      <select id="noteSubject"></select>
+
+      <button id="saveNoteBtn" class="primary full-width">
+        Save note
+      </button>
+
+      <p id="noteStatus" class="status" aria-live="polite"></p>
+
+      <h3>Saved notes</h3>
+
+      <ul id="notesList" class="list">
+        <li class="empty">No notes saved yet.</li>
+      </ul>
+    </section>
+
+    <footer class="footer">
+      StudyTrack stores data locally in this browser for now.
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
