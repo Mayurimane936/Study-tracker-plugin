@@ -46,6 +46,7 @@ chrome.runtime.onStartup.addListener(() => {
     const { activeWebsiteSession: active } =
       await chrome.storage.local.get("activeWebsiteSession");
 
+    // Do not count time while the browser was closed.
     if (active) {
       await finalizeActiveSession(active.lastCheckpointAt || active.startedAt);
     }
@@ -260,29 +261,30 @@ async function resumeActiveSession(active, tab) {
   return active;
 }
 
-// Automatically track the currently active configured study website.
+/**
+ * Automatically track whichever configured study website is currently active.
+ * - A configured site in the focused browser window starts tracking.
+ * - Switching to another configured site closes the previous session and starts
+ *   a new one for the new site.
+ * - Switching to a non-configured site or losing browser focus pauses tracking.
+ */
 async function syncActiveTab() {
   let tabs;
 
   try {
-    tabs = await chrome.tabs.query({
-      active: true,
-      lastFocusedWindow: true
-    });
+    tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   } catch {
     await pauseActiveSession(Date.now());
     return;
   }
 
   const tab = tabs?.[0];
-
   if (!tab || tab.id == null || tab.windowId == null) {
     await pauseActiveSession(Date.now());
     return;
   }
 
   let windowInfo;
-
   try {
     windowInfo = await chrome.windows.get(tab.windowId);
   } catch {
@@ -291,20 +293,39 @@ async function syncActiveTab() {
   }
 
   const hostname = getHostname(tab.url);
-  const isFocused = Boolean(windowInfo.focused);
+  const focused = Boolean(windowInfo.focused);
   const sites = await getWebsiteSites();
-  const siteConfig = isFocused ? findSiteConfig(hostname, sites) : null;
+  const siteConfig = focused ? findSiteConfig(hostname, sites) : null;
+  const stored = await chrome.storage.local.get([
+    "activeWebsiteSession",
+    "stoppedWebsiteSession"
+  ]);
+  const active = stored.activeWebsiteSession || null;
+  const stopped = stored.stoppedWebsiteSession || null;
 
-  const { activeWebsiteSession: active } =
-    await chrome.storage.local.get("activeWebsiteSession");
+  // After the user presses Stop, don't auto-start again while they remain
+  // on the same tab. Leaving the tab/site clears this one-session suppression.
+  const isSameStoppedTab = Boolean(
+    stopped &&
+    stopped.hostname === hostname &&
+    stopped.tabId === tab.id &&
+    stopped.windowId === tab.windowId
+  );
 
-  // Pause when the active tab is not a configured study website.
+  if (stopped && !isSameStoppedTab) {
+    await chrome.storage.local.remove("stoppedWebsiteSession");
+  }
+
+  if (isSameStoppedTab) {
+    if (active) await pauseActiveSession(Date.now());
+    return;
+  }
+
   if (!siteConfig) {
     await pauseActiveSession(Date.now());
     return;
   }
 
-  // If the same configured website and tab are active, keep tracking.
   const isSameSession = Boolean(
     active &&
     active.hostname === hostname &&
@@ -313,20 +334,14 @@ async function syncActiveTab() {
   );
 
   if (isSameSession) {
-    if (active.isPaused) {
-      await resumeActiveSession(active, tab);
-    }
+    if (active.isPaused) await resumeActiveSession(active, tab);
     return;
   }
 
-  // A different configured website is active.
-  // Finalize the previous session and start a new one.
-  if (active) {
-    await finalizeActiveSession(Date.now());
-  }
+  // Switching to another configured study website completes the old session.
+  if (active) await finalizeActiveSession(Date.now());
 
   const now = Date.now();
-
   const newActiveSession = {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -338,9 +353,7 @@ async function syncActiveTab() {
     isPaused: false
   };
 
-  await chrome.storage.local.set({
-    activeWebsiteSession: newActiveSession
-  });
+  await chrome.storage.local.set({ activeWebsiteSession: newActiveSession });
 }
 
 async function getNoteTopics() {
@@ -477,10 +490,21 @@ async function handleMessage(message, sender) {
     }
 
     case "GET_WEBSITE_TRACKING_DATA": {
+      // Re-check the active tab whenever the popup asks for tracking status.
       await enqueue(syncActiveTab);
 
-      const { activeWebsiteSession: active } =
-        await chrome.storage.local.get("activeWebsiteSession");
+      const { activeWebsiteSession: active, stoppedWebsiteSession: stopped } =
+        await chrome.storage.local.get(["activeWebsiteSession", "stoppedWebsiteSession"]);
+
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+      const currentTab = tabs?.[0];
+      const currentHostname = getHostname(currentTab?.url);
+      const isStoppedHere = Boolean(
+        stopped && currentTab &&
+        stopped.hostname === currentHostname &&
+        stopped.tabId === currentTab.id &&
+        stopped.windowId === currentTab.windowId
+      );
 
       const elapsedMs = active
         ? (active.accumulatedMs || 0) +
@@ -498,32 +522,38 @@ async function handleMessage(message, sender) {
         success: true,
         sites: await getWebsiteSites(),
         active: active || null,
-        elapsedMs
+        elapsedMs,
+        stopped: isStoppedHere
       };
     }
 
-    // Retained for compatibility with older extension scripts.
+    // Kept for compatibility with older popup scripts or other extension files.
+    // The popup no longer shows an Add Website form.
     case "ADD_STUDY_SITE": {
       const domain = normalizeDomain(message.domain);
       const subject = String(message.subject || "DSA").trim();
       const sites = await getWebsiteSites();
       const existing = sites.find(site => site.domain === domain);
 
-      if (existing) {
-        existing.subject = subject || existing.subject || "DSA";
-        await chrome.storage.local.set({ studySites: sites });
-        return { success: true, sites, site: existing };
+      let site = sites.find(item => item.domain === domain);
+
+      if (site) {
+        site.subject = subject || site.subject || "DSA";
+      } else {
+        site = {
+          domain,
+          subject: subject || "DSA",
+          enabled: true
+        };
+        sites.push(site);
       }
 
-      const site = {
-        domain,
-        subject: subject || "DSA",
-        enabled: true
-      };
-
-      sites.push(site);
       await chrome.storage.local.set({ studySites: sites });
-      return { success: true, sites, site };
+      await chrome.storage.local.remove("stoppedWebsiteSession");
+      await enqueue(syncActiveTab);
+      const { activeWebsiteSession: active } =
+        await chrome.storage.local.get("activeWebsiteSession");
+      return { success: true, sites, site, active: active || null };
     }
 
     case "START_WEBSITE_SESSION": {
@@ -589,6 +619,7 @@ async function handleMessage(message, sender) {
         isPaused: false
       };
 
+      await chrome.storage.local.remove("stoppedWebsiteSession");
       await chrome.storage.local.set({
         studySites: sites,
         activeWebsiteSession: active
@@ -599,7 +630,24 @@ async function handleMessage(message, sender) {
 
     case "STOP_WEBSITE_SESSION": {
       const domain = normalizeDomain(message.domain);
+      const { activeWebsiteSession: current } =
+        await chrome.storage.local.get("activeWebsiteSession");
+      const tab = sender?.tab;
+      const stoppedHostname = current?.hostname || getHostname(tab?.url) || domain;
       const completed = await finalizeActiveSession(Date.now(), domain);
+
+      // Prevent syncActiveTab from immediately creating another session on
+      // the same tab after Stop. Switching away clears this flag.
+      if (tab?.id != null && tab?.windowId != null) {
+        await chrome.storage.local.set({
+          stoppedWebsiteSession: {
+            hostname: stoppedHostname,
+            tabId: tab.id,
+            windowId: tab.windowId,
+            stoppedAt: Date.now()
+          }
+        });
+      }
 
       return {
         success: true,
@@ -616,11 +664,21 @@ async function handleMessage(message, sender) {
 
     case "REMOVE_STUDY_SITE": {
       const domain = normalizeDomain(message.domain);
+
+      // Save any active time before removing the site from the list.
+      await finalizeActiveSession(Date.now(), domain);
+
       const sites = (await getWebsiteSites())
         .filter(site => site.domain !== domain);
-
       await chrome.storage.local.set({ studySites: sites });
-      await finalizeActiveSession(Date.now(), domain);
+
+      const { stoppedWebsiteSession: stopped } =
+        await chrome.storage.local.get("stoppedWebsiteSession");
+      if (stopped && (
+        stopped.hostname === domain || stopped.hostname.endsWith(`.${domain}`)
+      )) {
+        await chrome.storage.local.remove("stoppedWebsiteSession");
+      }
 
       return { success: true, sites };
     }

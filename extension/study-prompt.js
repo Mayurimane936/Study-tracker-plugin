@@ -1,7 +1,9 @@
+
 (() => {
   if (document.getElementById("studytrack-study-prompt-host")) return;
 
   let currentUrl;
+
   try {
     currentUrl = new URL(window.location.href);
   } catch {
@@ -12,6 +14,8 @@
 
   const domain = currentUrl.hostname.toLowerCase();
   if (!domain) return;
+
+  const CREATE_NEW_TOPIC = "__studytrack_create_new_topic__";
 
   const host = document.createElement("div");
   host.id = "studytrack-study-prompt-host";
@@ -29,7 +33,9 @@
 
   shadow.innerHTML = `
     <style>
-      * { box-sizing: border-box; }
+      *, *::before, *::after {
+        box-sizing: border-box;
+      }
 
       .logo {
         position: fixed;
@@ -40,6 +46,7 @@
         justify-content: center;
         width: 48px;
         height: 48px;
+        padding: 0;
         border: 0;
         border-radius: 50%;
         background: #1967d2;
@@ -50,17 +57,19 @@
         pointer-events: auto;
       }
 
-      .logo:hover { background: #185abc; }
+      .logo:hover {
+        background: #185abc;
+      }
 
       .card {
         position: fixed;
         right: 18px;
         bottom: 76px;
-        width: 326px;
+        width: 340px;
         max-width: calc(100vw - 24px);
         max-height: calc(100vh - 100px);
         overflow: auto;
-        padding: 17px;
+        padding: 18px;
         border: 1px solid #dfe3e8;
         border-radius: 16px;
         background: #fff;
@@ -68,9 +77,20 @@
         box-shadow: 0 8px 32px #0003;
         font: 14px/1.45 Arial, sans-serif;
         pointer-events: auto;
+        isolation: isolate;
       }
 
-      .hidden { display: none !important; }
+      .card button,
+      .card input,
+      .card select {
+        box-sizing: border-box;
+        max-width: 100%;
+        font-family: Arial, sans-serif;
+      }
+
+      .hidden {
+        display: none !important;
+      }
 
       .header {
         display: flex;
@@ -80,9 +100,9 @@
 
       .mark {
         display: flex;
+        flex: 0 0 38px;
         align-items: center;
         justify-content: center;
-        flex: 0 0 38px;
         height: 38px;
         border-radius: 11px;
         background: #e8f0fe;
@@ -91,20 +111,33 @@
         font-weight: 700;
       }
 
-      .heading { margin: 0 0 5px; font-size: 17px; }
-      .description { margin: 0; color: #5f6368; overflow-wrap: anywhere; }
+      .heading {
+        margin: 0 0 5px;
+        color: #202124;
+        font-size: 17px;
+        font-weight: 700;
+      }
+
+      .description {
+        margin: 0;
+        color: #5f6368;
+        overflow-wrap: anywhere;
+      }
 
       .close {
+        flex: 0 0 auto;
         margin-left: auto;
+        padding: 0 5px;
         border: 0;
         background: transparent;
         color: #5f6368;
-        font-size: 21px;
+        font-size: 24px;
+        line-height: 1;
         cursor: pointer;
       }
 
       .domain {
-        margin: 13px 0 4px;
+        margin: 14px 0 4px;
         font-weight: 700;
         overflow-wrap: anywhere;
       }
@@ -118,62 +151,112 @@
 
       .label {
         display: block;
-        margin: 13px 0 6px;
+        margin: 15px 0 7px;
+        color: #202124;
         font-weight: 600;
       }
 
-      .topic {
+      .topic,
+      .new-topic {
+        display: block;
         width: 100%;
-        padding: 10px;
+        min-width: 0;
+        min-height: 40px;
+        margin: 0;
+        padding: 9px 10px;
         border: 1px solid #dadce0;
         border-radius: 8px;
         background: #fff;
         color: #202124;
-        font: inherit;
+        font-size: 14px;
+        line-height: 1.4;
       }
 
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 14px;
-      }
-
-      .button {
-        flex: 1 1 42%;
-        min-width: 0;
-        padding: 10px 8px;
-        border: 0;
-        border-radius: 8px;
-        font: inherit;
-        font-weight: 600;
+      .topic {
         cursor: pointer;
       }
 
-      .primary { background: #1967d2; color: #fff; }
-      .primary:hover { background: #185abc; }
-      .secondary { background: #f1f3f4; color: #202124; }
-      .danger { background: #fce8e6; color: #b3261e; }
-      .button:disabled { opacity: .6; cursor: not-allowed; }
+      .topic:focus,
+      .new-topic:focus {
+        border-color: #1967d2;
+        outline: 2px solid #d2e3fc;
+      }
+
+      .new-topic {
+        margin-top: 8px;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 8px;
+        margin-top: 15px;
+      }
+
+      .button {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        min-height: 40px;
+        margin: 0;
+        padding: 9px 8px;
+        border: 0;
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.35;
+        font-weight: 600;
+        text-align: center;
+        overflow-wrap: anywhere;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: #1967d2;
+        color: #fff;
+      }
+
+      .primary:hover:not(:disabled) {
+        background: #185abc;
+      }
+
+      .secondary {
+        background: #f1f3f4;
+        color: #202124;
+      }
+
+      .danger {
+        background: #fce8e6;
+        color: #b3261e;
+      }
+
+      .button:disabled,
+      .topic:disabled,
+      .new-topic:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
 
       .status {
         min-height: 18px;
-        margin: 10px 0 0;
+        margin: 11px 0 0;
         color: #137333;
         font-size: 12px;
         overflow-wrap: anywhere;
       }
 
-      .error { color: #b3261e; }
-      .small { margin-top: 6px; color: #5f6368; font-size: 12px; }
+      .error {
+        color: #b3261e;
+      }
+
+      .small {
+        margin: 6px 0 0;
+        color: #5f6368;
+        font-size: 12px;
+      }
     </style>
 
-    <button
-      class="logo hidden"
-      type="button"
-      title="Open StudyTrack"
-      aria-label="Open StudyTrack"
-    >S</button>
+    <button class="logo hidden" type="button"
+      title="Open StudyTrack" aria-label="Open StudyTrack">S</button>
 
     <section class="card hidden" aria-label="StudyTrack controls">
       <div class="header">
@@ -193,23 +276,31 @@
         What are you studying?
       </label>
 
-      <select class="topic" id="studytrack-topic">
+      <select class="topic" id="studytrack-topic" disabled>
         <option value="">Loading topics...</option>
       </select>
+
+      <input class="new-topic hidden" type="text" maxlength="50"
+        placeholder="Enter a new topic name"
+        aria-label="New study topic">
 
       <div class="actions">
         <button class="button primary start" type="button" disabled>
           Start studying
         </button>
+
         <button class="button secondary add" type="button" disabled>
           Add to study list
         </button>
+
         <button class="button danger stop hidden" type="button">
           Stop session
         </button>
+
         <button class="button danger remove hidden" type="button">
           Remove from study list
         </button>
+
         <button class="button secondary not-now" type="button">
           Not now
         </button>
@@ -228,6 +319,7 @@
   const timer = shadow.querySelector(".timer");
   const sessionLabel = shadow.querySelector(".session-label");
   const topicSelect = shadow.querySelector(".topic");
+  const newTopicInput = shadow.querySelector(".new-topic");
   const startButton = shadow.querySelector(".start");
   const addButton = shadow.querySelector(".add");
   const stopButton = shadow.querySelector(".stop");
@@ -238,11 +330,16 @@
   domainLabel.textContent = domain;
 
   let topics = [];
+  let topicsLoaded = false;
+  let busy = false;
   let siteConfig = null;
   let activeSession = null;
   let elapsedMs = 0;
+  let stoppedSession = false;
   let cardMode = "invitation";
   let refreshInProgress = false;
+  let clockInterval = null;
+  let refreshInterval = null;
 
   function setStatus(message, isError = false) {
     status.textContent = message;
@@ -262,28 +359,35 @@
   function formatDuration(ms) {
     const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
     const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
-    const minutes = String(
-      Math.floor((totalSeconds % 3600) / 60)
-    ).padStart(2, "0");
+    const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
     const seconds = String(totalSeconds % 60).padStart(2, "0");
 
     return `${hours}:${minutes}:${seconds}`;
   }
 
   function findMatchingSite(sites) {
-    return (sites || [])
+    return (Array.isArray(sites) ? sites : [])
       .filter(site => {
-        const siteDomain = String(site.domain || "")
+        const siteDomain = String(site?.domain || "")
           .toLowerCase()
           .replace(/\.$/, "");
 
-        return domain === siteDomain || domain.endsWith("." + siteDomain);
+        return siteDomain &&
+          (domain === siteDomain || domain.endsWith("." + siteDomain));
       })
       .sort((a, b) => b.domain.length - a.domain.length)[0] || null;
   }
 
   async function sendMessage(message) {
-    const response = await chrome.runtime.sendMessage(message);
+    let response;
+
+    try {
+      response = await chrome.runtime.sendMessage(message);
+    } catch (error) {
+      throw new Error(
+        `StudyTrack connection failed: ${error?.message || "Please reload the extension."}`
+      );
+    }
 
     if (!response || !response.success) {
       throw new Error(
@@ -294,11 +398,53 @@
     return response;
   }
 
+  // All action-button disabled states are managed in one place.
+  // This prevents a successful action from leaving the other button disabled.
+  function updateControls() {
+    const isActive = Boolean(
+      activeSession && activeSession.hostname === domain
+    );
+
+    topicSelect.disabled = busy || isActive || !topicsLoaded;
+    newTopicInput.disabled = busy || isActive || !topicsLoaded;
+
+    startButton.disabled = busy || isActive || !topicsLoaded;
+    addButton.disabled = busy || isActive || !topicsLoaded;
+    stopButton.disabled = busy;
+    removeButton.disabled = busy;
+    notNowButton.disabled = busy;
+    closeButton.disabled = busy;
+  }
+
+  function setBusy(value) {
+    busy = value;
+    updateControls();
+  }
+
   async function loadTopics(preferredTopic) {
-    const response = await sendMessage({ action: "GET_NOTE_TOPICS" });
-    topics = response.topics || [];
+    const response = await sendMessage({
+      action: "GET_NOTE_TOPICS"
+    });
+
+    const receivedTopics = Array.isArray(response.topics)
+      ? response.topics
+      : [];
+
+    topics = [...new Set(
+      receivedTopics
+        .filter(topic => typeof topic === "string")
+        .map(topic => topic.trim())
+        .filter(Boolean)
+    )];
 
     topicSelect.replaceChildren();
+
+    if (topics.length === 0) {
+      const emptyOption = document.createElement("option");
+      emptyOption.value = "";
+      emptyOption.textContent = "No topics available";
+      topicSelect.appendChild(emptyOption);
+    }
 
     for (const topic of topics) {
       const option = document.createElement("option");
@@ -307,73 +453,137 @@
       topicSelect.appendChild(option);
     }
 
-    if (!topics.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "Create a topic first";
-      topicSelect.appendChild(option);
+    const createOption = document.createElement("option");
+    createOption.value = CREATE_NEW_TOPIC;
+    createOption.textContent = "+ Create a new topic...";
+    topicSelect.appendChild(createOption);
 
-      startButton.disabled = true;
-      addButton.disabled = true;
-      return;
-    }
-
-    const match = topics.find(
-      topic =>
-        topic.toLowerCase() ===
-        String(preferredTopic || "").toLowerCase()
+    const preferred = topics.find(topic =>
+      topic.toLowerCase() === String(preferredTopic || "").toLowerCase()
     );
 
-    topicSelect.value = match || topics[0];
-    startButton.disabled = false;
-    addButton.disabled = false;
+    topicSelect.value = preferred || topics[0] || CREATE_NEW_TOPIC;
+
+    newTopicInput.classList.toggle(
+      "hidden",
+      topicSelect.value !== CREATE_NEW_TOPIC
+    );
+
+    topicsLoaded = true;
+    updateControls();
   }
 
+  async function resolveSelectedTopic() {
+    if (!topicsLoaded) {
+      throw new Error("Topics are still loading. Please try again.");
+    }
+
+    if (topicSelect.value !== CREATE_NEW_TOPIC) {
+      const selected = String(topicSelect.value || "").trim();
+
+      if (!selected) {
+        throw new Error("Please select a study topic.");
+      }
+
+      return selected;
+    }
+
+    const name = String(newTopicInput.value || "").trim();
+
+    if (!name) {
+      newTopicInput.focus();
+      throw new Error("Enter a name for your new topic.");
+    }
+
+    const response = await sendMessage({
+      action: "CREATE_NOTE_TOPIC",
+      topic: name
+    });
+
+    await loadTopics(response.topic);
+
+    topicSelect.value = response.topic;
+    newTopicInput.value = "";
+    newTopicInput.classList.add("hidden");
+
+    return response.topic;
+  }
+
+  topicSelect.addEventListener("change", () => {
+    const creating = topicSelect.value === CREATE_NEW_TOPIC;
+
+    newTopicInput.classList.toggle("hidden", !creating);
+
+    if (creating) newTopicInput.focus();
+
+    setStatus(
+      creating
+        ? "Enter a name for your new topic."
+        : `Selected topic: ${topicSelect.value}`
+    );
+  });
+
   function renderState() {
-    const hasSession = Boolean(
+    const isActive = Boolean(
       activeSession && activeSession.hostname === domain
     );
+
     const isListed = Boolean(siteConfig);
 
-    timer.classList.toggle("hidden", !hasSession);
-    sessionLabel.classList.toggle("hidden", !hasSession);
-    stopButton.classList.toggle("hidden", !hasSession);
+    timer.classList.toggle("hidden", !isActive && !stoppedSession);
+    sessionLabel.classList.toggle("hidden", !isActive && !stoppedSession);
+
+    stopButton.classList.toggle("hidden", !isActive);
     removeButton.classList.toggle("hidden", !isListed);
-    startButton.classList.toggle("hidden", hasSession);
+
+    startButton.classList.toggle("hidden", isActive);
     addButton.classList.toggle("hidden", isListed);
-    topicSelect.disabled = hasSession;
 
-    if (hasSession) {
-      cardMode = activeSession.isPaused ? "paused" : "active";
+    if (isActive) {
+      cardMode = "active";
       timer.textContent = formatDuration(elapsedMs);
-
-      sessionLabel.textContent = activeSession.isPaused
-        ? `Paused · ${activeSession.subject || "Other"}`
-        : `Studying ${activeSession.subject || "Other"}`;
-
-      startButton.textContent = "Start studying";
+      sessionLabel.textContent = `Studying ${activeSession.subject || "Other"}`;
       notNowButton.textContent = "Minimize";
 
-      setStatus(
-        activeSession.isPaused
-          ? "Tracking is paused. It will resume when you return to this website."
-          : "Your study time is being recorded."
-      );
+      if (!busy) {
+        setStatus(activeSession.isPaused
+          ? "Study timer paused. Return to this website to resume."
+          : "Your study time is being recorded.");
+      }
     } else if (isListed) {
       cardMode = "listed";
-      startButton.textContent = "Start studying";
-      notNowButton.textContent = "Not now";
-      setStatus("This website is in your study list.");
+      notNowButton.textContent = "Minimize";
+
+      if (stoppedSession) {
+        timer.textContent = "00:00:00";
+        sessionLabel.textContent = "Session stopped";
+
+        if (!busy) {
+          setStatus("Session saved. Click Start studying to begin again.");
+        }
+      } else {
+        timer.classList.add("hidden");
+        sessionLabel.classList.add("hidden");
+
+        if (!busy) {
+          setStatus("This website is in your study list.");
+        }
+      }
     } else {
       cardMode = "invitation";
-      startButton.textContent = "Start studying";
       notNowButton.textContent = "Not now";
-      setStatus("Choose a topic to begin, or add this site for later.");
+
+      if (!busy && topicsLoaded) {
+        setStatus("Choose a topic, then add this site to start tracking.");
+      }
     }
+
+    updateControls();
   }
 
   async function refreshState() {
     if (refreshInProgress) return;
+
     refreshInProgress = true;
 
     try {
@@ -388,10 +598,9 @@
         domain.endsWith("." + data.active.hostname)
       ) ? data.active : null;
 
+      stoppedSession = Boolean(data.stopped && siteConfig);
       elapsedMs = activeSession ? (data.elapsedMs || 0) : 0;
 
-      // Important: refreshing data must not change panel visibility.
-      // The panel closes only when the user clicks Minimize or Not now.
       renderState();
     } catch (error) {
       setStatus(error.message, true);
@@ -401,6 +610,8 @@
   }
 
   async function initialize() {
+    setBusy(true);
+
     try {
       const data = await sendMessage({
         action: "GET_WEBSITE_TRACKING_DATA"
@@ -413,62 +624,62 @@
         domain.endsWith("." + data.active.hostname)
       ) ? data.active : null;
 
+      stoppedSession = Boolean(data.stopped && siteConfig);
       elapsedMs = activeSession ? (data.elapsedMs || 0) : 0;
 
       await loadTopics(activeSession?.subject || siteConfig?.subject);
 
-      // On first load, show the invitation on a new site.
-      // For listed sites or an existing session, start minimized.
+      renderState();
+
       if (activeSession || siteConfig) {
-        cardMode = activeSession
-          ? (activeSession.isPaused ? "paused" : "active")
-          : "listed";
         showLogo();
       } else {
-        cardMode = "invitation";
         showCard();
       }
-
-      renderState();
     } catch (error) {
       showCard();
       setStatus(error.message, true);
+    } finally {
+      setBusy(false);
+      updateControls();
     }
   }
 
   logo.addEventListener("click", async () => {
-    await refreshState();
-
-    if (activeSession?.subject) {
-      await loadTopics(activeSession.subject);
-    } else if (siteConfig?.subject) {
-      await loadTopics(siteConfig.subject);
-    }
-
-    renderState();
     showCard();
+    setBusy(true);
+
+    try {
+      await refreshState();
+
+      await loadTopics(
+        activeSession?.subject || siteConfig?.subject || topicSelect.value
+      );
+
+      renderState();
+    } catch (error) {
+      setStatus(error.message, true);
+    } finally {
+      setBusy(false);
+      updateControls();
+    }
   });
 
   closeButton.addEventListener("click", showLogo);
 
   notNowButton.addEventListener("click", () => {
-    cardMode = siteConfig ? "listed" : "dismissed";
     showLogo();
   });
 
   startButton.addEventListener("click", async () => {
-    const subject = topicSelect.value;
+    if (busy) return;
 
-    if (!subject) {
-      setStatus("Please select a study topic.", true);
-      return;
-    }
-
-    startButton.disabled = true;
-    addButton.disabled = true;
+    setBusy(true);
     setStatus("Starting your study session...");
 
     try {
+      const subject = await resolveSelectedTopic();
+
       const response = await sendMessage({
         action: "START_WEBSITE_SESSION",
         domain,
@@ -477,33 +688,28 @@
 
       siteConfig = findMatchingSite(response.sites);
       activeSession = response.active;
+      stoppedSession = false;
       elapsedMs = 0;
-      cardMode = "active";
 
       renderState();
-
-      // Keep the panel open after starting. The user can minimize it manually.
-      showCard();
+      setStatus(`Study session started: ${subject}`);
     } catch (error) {
       setStatus(error.message, true);
-      startButton.disabled = false;
-      addButton.disabled = false;
+    } finally {
+      setBusy(false);
+      updateControls();
     }
   });
 
   addButton.addEventListener("click", async () => {
-    const subject = topicSelect.value;
+    if (busy) return;
 
-    if (!subject) {
-      setStatus("Please select a study topic.", true);
-      return;
-    }
-
-    addButton.disabled = true;
-    startButton.disabled = true;
+    setBusy(true);
     setStatus("Adding website to your study list...");
 
     try {
+      const subject = await resolveSelectedTopic();
+
       const response = await sendMessage({
         action: "ADD_STUDY_SITE",
         domain,
@@ -511,22 +717,32 @@
       });
 
       siteConfig = findMatchingSite(response.sites);
-      activeSession = null;
-      cardMode = "listed";
+
+      activeSession = response.active &&
+        response.active.hostname === domain
+        ? response.active
+        : null;
+
+      stoppedSession = false;
+      elapsedMs = 0;
 
       renderState();
 
-      // Keep the panel open after adding the site.
-      showCard();
+      setStatus(activeSession
+        ? `Study session started: ${subject}`
+        : `Website added to your study list under ${subject}.`);
     } catch (error) {
       setStatus(error.message, true);
-      addButton.disabled = false;
-      startButton.disabled = false;
+    } finally {
+      setBusy(false);
+      updateControls();
     }
   });
 
   stopButton.addEventListener("click", async () => {
-    stopButton.disabled = true;
+    if (busy) return;
+
+    setBusy(true);
     setStatus("Saving your study session...");
 
     try {
@@ -537,16 +753,24 @@
 
       activeSession = null;
       elapsedMs = 0;
+      stoppedSession = true;
+
       await refreshState();
+      renderState();
+
+      setStatus("Session saved. Click Start studying to begin again.");
     } catch (error) {
       setStatus(error.message, true);
     } finally {
-      stopButton.disabled = false;
+      setBusy(false);
+      updateControls();
     }
   });
 
   removeButton.addEventListener("click", async () => {
-    removeButton.disabled = true;
+    if (busy) return;
+
+    setBusy(true);
     setStatus("Removing website from your study list...");
 
     try {
@@ -557,26 +781,34 @@
 
       siteConfig = findMatchingSite(response.sites);
       activeSession = null;
-      cardMode = "invitation";
+      stoppedSession = false;
+      elapsedMs = 0;
 
       await refreshState();
+      renderState();
       showCard();
+
+      setStatus("Website removed from your study list.");
     } catch (error) {
       setStatus(error.message, true);
-      removeButton.disabled = false;
+    } finally {
+      setBusy(false);
+      updateControls();
     }
   });
 
   initialize();
 
-  // Only advance the displayed clock while the session is running.
-  setInterval(() => {
+  // Keep the timer moving locally while a session is running.
+  clockInterval = setInterval(() => {
     if (activeSession && !activeSession.isPaused) {
       elapsedMs += 1000;
       timer.textContent = formatDuration(elapsedMs);
     }
   }, 1000);
 
-  // Refresh session data without changing whether the panel is open.
-  setInterval(refreshState, 3000);
+  // Refresh tracking state in case it changes in another tab or popup.
+  refreshInterval = setInterval(() => {
+    refreshState();
+  }, 3000);
 })();

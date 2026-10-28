@@ -1,19 +1,15 @@
 
 (() => {
-  // Prevent duplicate UI if the script is injected more than once.
-  if (document.getElementById("studytrack-selection-host")) {
-    return;
-  }
+  if (document.getElementById("studytrack-selection-host")) return;
 
   const host = document.createElement("div");
   host.id = "studytrack-selection-host";
 
   Object.assign(host.style, {
     position: "fixed",
-    top: "0",
-    left: "0",
-    width: "0",
-    height: "0",
+    inset: "0",
+    width: "100vw",
+    height: "100vh",
     zIndex: "2147483647",
     pointerEvents: "none"
   });
@@ -22,12 +18,9 @@
 
   shadow.innerHTML = `
     <style>
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
 
-      .st-bubble,
-      .st-panel {
+      .st-bubble, .st-panel {
         position: fixed;
         pointer-events: auto;
         font-family: Arial, sans-serif;
@@ -48,14 +41,12 @@
         white-space: nowrap;
       }
 
-      .st-bubble:hover {
-        background: #303134;
-      }
-
       .st-panel {
         display: none;
         width: 300px;
         max-width: calc(100vw - 20px);
+        max-height: calc(100vh - 20px);
+        overflow-y: auto;
         padding: 16px;
         background: white;
         border: 1px solid #dadce0;
@@ -93,8 +84,7 @@
         font-weight: 600;
       }
 
-      .st-select,
-      .st-input {
+      .st-select, .st-input {
         display: block;
         width: 100%;
         min-width: 0;
@@ -104,6 +94,10 @@
         background: white;
         color: #202124;
         font: inherit;
+        pointer-events: auto;
+        user-select: text;
+        -webkit-user-select: text;
+        position: relative;
       }
 
       .st-create-row {
@@ -123,15 +117,12 @@
         font: inherit;
         font-weight: 600;
         cursor: pointer;
+        pointer-events: auto;
       }
 
       .st-primary {
         background: #1967d2;
         color: white;
-      }
-
-      .st-primary:hover {
-        background: #185abc;
       }
 
       .st-secondary {
@@ -145,9 +136,7 @@
         margin-top: 14px;
       }
 
-      .st-actions .st-button {
-        flex: 1;
-      }
+      .st-actions .st-button { flex: 1; }
 
       .st-status {
         min-height: 18px;
@@ -157,9 +146,7 @@
         overflow-wrap: anywhere;
       }
 
-      .st-error {
-        color: #b3261e;
-      }
+      .st-error { color: #b3261e; }
 
       .st-button:disabled {
         opacity: 0.6;
@@ -167,26 +154,18 @@
       }
     </style>
 
-    <button class="st-bubble" type="button">
-      Save to StudyTrack
-    </button>
+    <button class="st-bubble" type="button">Save to StudyTrack</button>
 
     <section class="st-panel" aria-label="Save study note">
       <h2 class="st-heading">Save study note</h2>
-      <p class="st-description">
-        Choose where this selection belongs.
-      </p>
+      <p class="st-description">Choose where this selection belongs.</p>
 
       <div class="st-preview"></div>
 
-      <label class="st-label" for="st-topic">
-        Existing topic
-      </label>
+      <label class="st-label" for="st-topic">Existing topic</label>
       <select class="st-select" id="st-topic"></select>
 
-      <label class="st-label" for="st-new-topic">
-        Or create a new topic
-      </label>
+      <label class="st-label" for="st-new-topic">Or create a new topic</label>
       <div class="st-create-row">
         <input
           class="st-input"
@@ -194,6 +173,7 @@
           type="text"
           maxlength="50"
           placeholder="e.g. Operating Systems"
+          autocomplete="off"
         />
         <button class="st-button st-secondary" id="st-create" type="button">
           Create
@@ -239,16 +219,11 @@
 
   function positionElement(element, left, top) {
     const margin = 10;
+    const maxLeft = Math.max(margin, window.innerWidth - element.offsetWidth - margin);
+    const maxTop = Math.max(margin, window.innerHeight - element.offsetHeight - margin);
 
-    element.style.left = `${Math.max(
-      margin,
-      Math.min(left, window.innerWidth - element.offsetWidth - margin)
-    )}px`;
-
-    element.style.top = `${Math.max(
-      margin,
-      Math.min(top, window.innerHeight - element.offsetHeight - margin)
-    )}px`;
+    element.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`;
+    element.style.top = `${Math.max(margin, Math.min(top, maxTop))}px`;
   }
 
   function hideUI() {
@@ -267,8 +242,7 @@
     });
 
     const match = topics.find(
-      topic => topic.toLowerCase() ===
-        String(preferredTopic || "").toLowerCase()
+      topic => topic.toLowerCase() === String(preferredTopic || "").toLowerCase()
     );
 
     topicSelect.value = match || topics[0] || "DSA";
@@ -283,17 +257,16 @@
       throw new Error(response?.error || "Could not load topics.");
     }
 
-    topics = response.topics || ["DSA", "C++", "System Design", "Other"];
+    topics = Array.isArray(response.topics)
+      ? response.topics
+      : ["DSA", "C++", "System Design", "Other"];
+
     renderTopics(selectedTopic);
   }
 
   function showBubble() {
     bubble.style.display = "block";
-    positionElement(
-      bubble,
-      selectionPosition.left,
-      selectionPosition.top
-    );
+    positionElement(bubble, selectionPosition.left, selectionPosition.top);
   }
 
   function openPanel() {
@@ -310,56 +283,44 @@
       selectionPosition.top + 38
     );
 
-    loadTopics().catch(error => {
-      setStatus(error.message, true);
-    });
+    // Focus immediately so keyboard input goes into the topic field.
+    newTopicInput.focus({ preventScroll: true });
+
+    loadTopics()
+      .then(() => {
+        // Loading the topic list should not steal focus from the input.
+        newTopicInput.focus({ preventScroll: true });
+      })
+      .catch(error => setStatus(error.message, true));
   }
 
   function inspectSelection() {
     const selection = window.getSelection();
 
     if (!selection || selection.isCollapsed || !selection.toString().trim()) {
-      if (panel.style.display !== "block") {
-        bubble.style.display = "none";
-      }
+      if (panel.style.display !== "block") bubble.style.display = "none";
       return;
     }
 
     const anchorNode = selection.anchorNode;
+    if (anchorNode && host.contains(anchorNode)) return;
 
-    if (anchorNode && host.contains(anchorNode)) {
-      return;
-    }
-
-    const text = selection.toString().trim();
-
-    if (!text) {
-      return;
-    }
-
-    selectedText = text;
+    selectedText = selection.toString().trim();
     pageTitle = document.title;
     pageUrl = window.location.href;
 
-    const range = selection.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
 
     selectionPosition = {
       left: Math.max(10, Math.min(rect.left, window.innerWidth - 200)),
-      top: rect.bottom + 8
+      top: Math.min(rect.bottom + 8, window.innerHeight - 60)
     };
 
-    if (panel.style.display !== "block") {
-      showBubble();
-    }
+    if (panel.style.display !== "block") showBubble();
   }
 
   document.addEventListener("mouseup", event => {
-    if (host.contains(event.target)) {
-      return;
-    }
-
-    // Let the browser finish updating its text selection first.
+    if (event.composedPath().includes(host)) return;
     setTimeout(inspectSelection, 10);
   });
 
@@ -380,6 +341,7 @@
     const name = newTopicInput.value.trim();
 
     if (!name) {
+      newTopicInput.focus();
       setStatus("Enter a name for the new topic.", true);
       return;
     }
@@ -400,10 +362,11 @@
       selectedTopic = response.topic;
       renderTopics(selectedTopic);
       newTopicInput.value = "";
-
       setStatus(`Topic "${selectedTopic}" is ready.`);
+      newTopicInput.focus();
     } catch (error) {
       setStatus(error.message, true);
+      newTopicInput.focus();
     } finally {
       createButton.disabled = false;
     }
@@ -434,8 +397,6 @@
 
       selectedTopic = response.note.topic;
       setStatus(`Saved to "${selectedTopic}".`);
-
-      // Keep the success message visible briefly, then close the panel.
       setTimeout(hideUI, 1100);
     } catch (error) {
       setStatus(error.message, true);
@@ -447,18 +408,12 @@
   cancelButton.addEventListener("click", hideUI);
 
   document.addEventListener("mousedown", event => {
-    if (!host.contains(event.target)) {
-      // Don't close the panel when the user interacts with its controls.
-      // A click elsewhere closes it only if the panel is open.
-      if (panel.style.display === "block") {
-        hideUI();
-      }
+    if (!event.composedPath().includes(host) && panel.style.display === "block") {
+      hideUI();
     }
   });
 
   window.addEventListener("scroll", () => {
-    if (panel.style.display !== "block") {
-      bubble.style.display = "none";
-    }
+    if (panel.style.display !== "block") bubble.style.display = "none";
   }, true);
 })();
