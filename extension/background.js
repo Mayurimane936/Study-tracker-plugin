@@ -396,16 +396,22 @@ async function createNoteTopic(topicName) {
   return name;
 }
 
+
 async function saveStudyNote({ text, title, url, pageTitle, topic }) {
   const noteText = String(text || "").trim();
 
-  if (!noteText) throw new Error("There is no text to save.");
+  if (!noteText) {
+    throw new Error("There is no text to save.");
+  }
+
   if (noteText.length > 50000) {
     throw new Error("This note is too long to save.");
   }
 
   const chosenTopic = await createNoteTopic(topic || "DSA");
-  const { studyNotes = [] } = await chrome.storage.local.get("studyNotes");
+  const { studyNotes = [] } =
+    await chrome.storage.local.get("studyNotes");
+
   const safePageTitle = String(pageTitle || "").slice(0, 500);
 
   const note = {
@@ -418,11 +424,59 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
     topic: chosenTopic,
     url: String(url || "").slice(0, 2000),
     pageTitle: safePageTitle,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    backendId: null,
+    syncStatus: "pending"
   };
 
+  // Save locally first, so a backend problem doesn't lose the note.
   studyNotes.unshift(note);
   await chrome.storage.local.set({ studyNotes });
+
+  // Attempt to sync the note with FastAPI.
+  try {
+    const response = await fetch("http://127.0.0.1:8000/notes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        title: note.title,
+        content: note.text,
+        topic_id: null
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Backend returned HTTP ${response.status}`);
+    }
+
+    const savedNote = await response.json();
+
+    note.backendId = savedNote.id;
+    note.syncStatus = "synced";
+
+    // Update the locally stored version with its backend ID.
+    const stored = await chrome.storage.local.get("studyNotes");
+    const currentNotes = Array.isArray(stored.studyNotes)
+      ? stored.studyNotes
+      : [];
+
+    const updatedNotes = currentNotes.map(item =>
+      item.id === note.id ? note : item
+    );
+
+    await chrome.storage.local.set({
+      studyNotes: updatedNotes
+    });
+  } catch (error) {
+    console.warn(
+      "StudyTrack: Note saved locally but backend sync failed.",
+      error
+    );
+    // Keep the note locally with syncStatus: "pending".
+  }
+
   return note;
 }
 

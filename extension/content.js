@@ -2,6 +2,8 @@
 (() => {
   if (document.getElementById("studytrack-selection-host")) return;
 
+  const CREATE_NEW_TOPIC = "__studytrack_create_new_topic__";
+
   const host = document.createElement("div");
   host.id = "studytrack-selection-host";
 
@@ -88,6 +90,7 @@
         display: block;
         width: 100%;
         min-width: 0;
+        min-height: 38px;
         padding: 9px;
         border: 1px solid #dadce0;
         border-radius: 7px;
@@ -100,14 +103,17 @@
         position: relative;
       }
 
-      .st-create-row {
-        display: flex;
-        gap: 6px;
+      .st-select:focus, .st-input:focus {
+        border-color: #1967d2;
+        outline: 2px solid #d2e3fc;
+      }
+
+      .st-input {
         margin-top: 8px;
       }
 
-      .st-create-row .st-input {
-        flex: 1;
+      .st-hidden {
+        display: none !important;
       }
 
       .st-button {
@@ -125,6 +131,10 @@
         color: white;
       }
 
+      .st-primary:hover:not(:disabled) {
+        background: #185abc;
+      }
+
       .st-secondary {
         background: #e8eaed;
         color: #202124;
@@ -136,7 +146,9 @@
         margin-top: 14px;
       }
 
-      .st-actions .st-button { flex: 1; }
+      .st-actions .st-button {
+        flex: 1;
+      }
 
       .st-status {
         min-height: 18px;
@@ -146,44 +158,53 @@
         overflow-wrap: anywhere;
       }
 
-      .st-error { color: #b3261e; }
+      .st-error {
+        color: #b3261e;
+      }
 
-      .st-button:disabled {
+      .st-button:disabled,
+      .st-select:disabled,
+      .st-input:disabled {
         opacity: 0.6;
         cursor: not-allowed;
       }
     </style>
 
-    <button class="st-bubble" type="button">Save to StudyTrack</button>
+    <button class="st-bubble" type="button">
+      Save to StudyTrack
+    </button>
 
     <section class="st-panel" aria-label="Save study note">
       <h2 class="st-heading">Save study note</h2>
-      <p class="st-description">Choose where this selection belongs.</p>
+      <p class="st-description">
+        Choose where this selection belongs.
+      </p>
 
       <div class="st-preview"></div>
 
-      <label class="st-label" for="st-topic">Existing topic</label>
-      <select class="st-select" id="st-topic"></select>
+      <label class="st-label" for="st-topic">
+        Study topic
+      </label>
 
-      <label class="st-label" for="st-new-topic">Or create a new topic</label>
-      <div class="st-create-row">
-        <input
-          class="st-input"
-          id="st-new-topic"
-          type="text"
-          maxlength="50"
-          placeholder="e.g. Operating Systems"
-          autocomplete="off"
-        />
-        <button class="st-button st-secondary" id="st-create" type="button">
-          Create
-        </button>
-      </div>
+      <select class="st-select" id="st-topic" disabled>
+        <option value="">Loading topics...</option>
+      </select>
+
+      <input
+        class="st-input st-hidden"
+        id="st-new-topic"
+        type="text"
+        maxlength="50"
+        placeholder="Enter a new topic name"
+        autocomplete="off"
+        aria-label="New study topic"
+      />
 
       <div class="st-actions">
         <button class="st-button st-primary" id="st-save" type="button">
           Save note
         </button>
+
         <button class="st-button st-secondary" id="st-cancel" type="button">
           Cancel
         </button>
@@ -200,7 +221,6 @@
   const preview = shadow.querySelector(".st-preview");
   const topicSelect = shadow.querySelector("#st-topic");
   const newTopicInput = shadow.querySelector("#st-new-topic");
-  const createButton = shadow.querySelector("#st-create");
   const saveButton = shadow.querySelector("#st-save");
   const cancelButton = shadow.querySelector("#st-cancel");
   const status = shadow.querySelector(".st-status");
@@ -211,19 +231,62 @@
   let selectedTopic = "DSA";
   let pageTitle = document.title;
   let pageUrl = window.location.href;
+  let busy = false;
+  let topicsLoaded = false;
 
   function setStatus(message, isError = false) {
     status.textContent = message;
     status.classList.toggle("st-error", isError);
   }
 
+  function setBusy(value) {
+    busy = value;
+    saveButton.disabled = value || !topicsLoaded;
+    cancelButton.disabled = value;
+    topicSelect.disabled = value || !topicsLoaded;
+    newTopicInput.disabled = value || !topicsLoaded;
+  }
+
+  async function sendMessage(message) {
+    let response;
+
+    try {
+      response = await chrome.runtime.sendMessage(message);
+    } catch (error) {
+      throw new Error(
+        `StudyTrack connection failed: ${
+          error?.message || "Please reload the extension."
+        }`
+      );
+    }
+
+    if (!response || !response.success) {
+      throw new Error(
+        response?.error || "StudyTrack could not complete this action."
+      );
+    }
+
+    return response;
+  }
+
   function positionElement(element, left, top) {
     const margin = 10;
-    const maxLeft = Math.max(margin, window.innerWidth - element.offsetWidth - margin);
-    const maxTop = Math.max(margin, window.innerHeight - element.offsetHeight - margin);
 
-    element.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`;
-    element.style.top = `${Math.max(margin, Math.min(top, maxTop))}px`;
+    const maxLeft = Math.max(
+      margin,
+      window.innerWidth - element.offsetWidth - margin
+    );
+
+    const maxTop = Math.max(
+      margin,
+      window.innerHeight - element.offsetHeight - margin
+    );
+
+    element.style.left =
+      `${Math.max(margin, Math.min(left, maxLeft))}px`;
+
+    element.style.top =
+      `${Math.max(margin, Math.min(top, maxTop))}px`;
   }
 
   function hideUI() {
@@ -231,51 +294,135 @@
     panel.style.display = "none";
   }
 
+  function updateTopicInput() {
+    const creating = topicSelect.value === CREATE_NEW_TOPIC;
+
+    newTopicInput.classList.toggle("st-hidden", !creating);
+
+    if (!creating) {
+      newTopicInput.value = "";
+    }
+  }
+
   function renderTopics(preferredTopic) {
     topicSelect.replaceChildren();
 
-    topics.forEach(topic => {
+    const normalizedTopics = [
+      ...new Set(
+        topics
+          .filter(topic => typeof topic === "string")
+          .map(topic => topic.trim())
+          .filter(Boolean)
+      )
+    ];
+
+    topics = normalizedTopics;
+
+    if (topics.length === 0) {
+      const emptyOption = document.createElement("option");
+      emptyOption.value = "";
+      emptyOption.textContent = "No existing topics";
+      topicSelect.appendChild(emptyOption);
+    }
+
+    for (const topic of topics) {
       const option = document.createElement("option");
       option.value = topic;
       option.textContent = topic;
       topicSelect.appendChild(option);
-    });
+    }
+
+    const createOption = document.createElement("option");
+    createOption.value = CREATE_NEW_TOPIC;
+    createOption.textContent = "+ Create a new topic...";
+    topicSelect.appendChild(createOption);
 
     const match = topics.find(
-      topic => topic.toLowerCase() === String(preferredTopic || "").toLowerCase()
+      topic =>
+        topic.toLowerCase() ===
+        String(preferredTopic || "").trim().toLowerCase()
     );
 
-    topicSelect.value = match || topics[0] || "DSA";
+    topicSelect.value = match || topics[0] || CREATE_NEW_TOPIC;
+
+    updateTopicInput();
   }
 
-  async function loadTopics() {
-    const response = await chrome.runtime.sendMessage({
+  async function loadTopics(preferredTopic = selectedTopic) {
+    const response = await sendMessage({
       action: "GET_NOTE_TOPICS"
     });
-
-    if (!response?.success) {
-      throw new Error(response?.error || "Could not load topics.");
-    }
 
     topics = Array.isArray(response.topics)
       ? response.topics
       : ["DSA", "C++", "System Design", "Other"];
 
-    renderTopics(selectedTopic);
+    renderTopics(preferredTopic);
+
+    topicsLoaded = true;
+    setBusy(busy);
+  }
+
+  async function resolveSelectedTopic() {
+    if (!topicsLoaded) {
+      throw new Error("Topics are still loading. Please try again.");
+    }
+
+    if (topicSelect.value !== CREATE_NEW_TOPIC) {
+      const selected = String(topicSelect.value || "").trim();
+
+      if (!selected) {
+        throw new Error("Please select a study topic.");
+      }
+
+      selectedTopic = selected;
+      return selected;
+    }
+
+    const name = newTopicInput.value.trim();
+
+    if (!name) {
+      newTopicInput.focus();
+      throw new Error("Enter a name for your new topic.");
+    }
+
+    const response = await sendMessage({
+      action: "CREATE_NOTE_TOPIC",
+      topic: name
+    });
+
+    const createdTopic = String(response.topic || name).trim();
+
+    // Reload from the extension's saved topic list.
+    await loadTopics(createdTopic);
+
+    selectedTopic = createdTopic;
+    topicSelect.value = createdTopic;
+    newTopicInput.value = "";
+    updateTopicInput();
+
+    return createdTopic;
   }
 
   function showBubble() {
     bubble.style.display = "block";
-    positionElement(bubble, selectionPosition.left, selectionPosition.top);
+    positionElement(
+      bubble,
+      selectionPosition.left,
+      selectionPosition.top
+    );
   }
 
-  function openPanel() {
+  async function openPanel() {
     bubble.style.display = "none";
     panel.style.display = "block";
 
     preview.textContent = selectedText;
-    newTopicInput.value = "";
-    setStatus("");
+    status.textContent = "";
+    status.classList.remove("st-error");
+
+    topicSelect.disabled = true;
+    saveButton.disabled = true;
 
     positionElement(
       panel,
@@ -283,26 +430,34 @@
       selectionPosition.top + 38
     );
 
-    // Focus immediately so keyboard input goes into the topic field.
-    newTopicInput.focus({ preventScroll: true });
-
-    loadTopics()
-      .then(() => {
-        // Loading the topic list should not steal focus from the input.
-        newTopicInput.focus({ preventScroll: true });
-      })
-      .catch(error => setStatus(error.message, true));
+    try {
+      await loadTopics(selectedTopic);
+      positionElement(
+        panel,
+        selectionPosition.left,
+        selectionPosition.top + 38
+      );
+    } catch (error) {
+      setStatus(error.message, true);
+    }
   }
 
   function inspectSelection() {
     const selection = window.getSelection();
 
-    if (!selection || selection.isCollapsed || !selection.toString().trim()) {
-      if (panel.style.display !== "block") bubble.style.display = "none";
+    if (
+      !selection ||
+      selection.isCollapsed ||
+      !selection.toString().trim()
+    ) {
+      if (panel.style.display !== "block") {
+        bubble.style.display = "none";
+      }
       return;
     }
 
     const anchorNode = selection.anchorNode;
+
     if (anchorNode && host.contains(anchorNode)) return;
 
     selectedText = selection.toString().trim();
@@ -312,12 +467,45 @@
     const rect = selection.getRangeAt(0).getBoundingClientRect();
 
     selectionPosition = {
-      left: Math.max(10, Math.min(rect.left, window.innerWidth - 200)),
-      top: Math.min(rect.bottom + 8, window.innerHeight - 60)
+      left: Math.max(
+        10,
+        Math.min(rect.left, window.innerWidth - 200)
+      ),
+      top: Math.min(
+        rect.bottom + 8,
+        window.innerHeight - 60
+      )
     };
 
-    if (panel.style.display !== "block") showBubble();
+    if (panel.style.display !== "block") {
+      showBubble();
+    }
   }
+
+  topicSelect.addEventListener("change", () => {
+    updateTopicInput();
+
+    if (topicSelect.value === CREATE_NEW_TOPIC) {
+      setStatus("Enter a name for your new topic.");
+      newTopicInput.focus();
+    } else {
+      selectedTopic = topicSelect.value;
+      setStatus(`Selected topic: ${selectedTopic}`);
+    }
+
+    positionElement(
+      panel,
+      selectionPosition.left,
+      selectionPosition.top + 38
+    );
+  });
+
+  newTopicInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveButton.click();
+    }
+  });
 
   document.addEventListener("mouseup", event => {
     if (event.composedPath().includes(host)) return;
@@ -335,85 +523,65 @@
     }
   });
 
-  bubble.addEventListener("click", openPanel);
-
-  createButton.addEventListener("click", async () => {
-    const name = newTopicInput.value.trim();
-
-    if (!name) {
-      newTopicInput.focus();
-      setStatus("Enter a name for the new topic.", true);
-      return;
-    }
-
-    createButton.disabled = true;
-
-    try {
-      const response = await chrome.runtime.sendMessage({
-        action: "CREATE_NOTE_TOPIC",
-        topic: name
-      });
-
-      if (!response?.success) {
-        throw new Error(response?.error || "Could not create topic.");
-      }
-
-      topics = response.topics;
-      selectedTopic = response.topic;
-      renderTopics(selectedTopic);
-      newTopicInput.value = "";
-      setStatus(`Topic "${selectedTopic}" is ready.`);
-      newTopicInput.focus();
-    } catch (error) {
-      setStatus(error.message, true);
-      newTopicInput.focus();
-    } finally {
-      createButton.disabled = false;
-    }
+  bubble.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openPanel();
   });
 
   saveButton.addEventListener("click", async () => {
+    if (busy) return;
+
     if (!selectedText.trim()) {
       setStatus("Select some text first.", true);
       return;
     }
 
-    saveButton.disabled = true;
+    setBusy(true);
     setStatus("Saving note...");
 
     try {
-      const response = await chrome.runtime.sendMessage({
+      const topic = await resolveSelectedTopic();
+
+      const response = await sendMessage({
         action: "SAVE_NOTE_FROM_PAGE",
         text: selectedText,
         title: pageTitle || "Saved selection",
         pageTitle,
         url: pageUrl,
-        topic: topicSelect.value
+        topic
       });
 
-      if (!response?.success) {
-        throw new Error(response?.error || "Could not save note.");
-      }
+      selectedTopic = response.note?.topic || topic;
 
-      selectedTopic = response.note.topic;
       setStatus(`Saved to "${selectedTopic}".`);
+
       setTimeout(hideUI, 1100);
     } catch (error) {
       setStatus(error.message, true);
     } finally {
-      saveButton.disabled = false;
+      setBusy(false);
     }
   });
 
   cancelButton.addEventListener("click", hideUI);
 
   document.addEventListener("mousedown", event => {
-    if (!event.composedPath().includes(host) && panel.style.display === "block") {
+    if (
+      !event.composedPath().includes(host) &&
+      panel.style.display === "block"
+    ) {
       hideUI();
     }
   });
 
-  window.addEventListener("scroll", () => {
-    if (panel.style.display !== "block") bubble.style.display = "none";
-  }, true);
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (panel.style.display !== "block") {
+        bubble.style.display = "none";
+      }
+    },
+    true
+  );
 })();
