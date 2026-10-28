@@ -11,7 +11,12 @@ const SAVE_SELECTION_MENU_ID = "studytrack-save-selection";
 const CHECKPOINT_ALARM = "studytrack-website-checkpoint";
 const MAX_SAVED_WEBSITE_SESSIONS = 2000;
 
+// Must match the backend address used by your local StudyTrack server.
+const BACKEND_URL = "http://127.0.0.1:8000";
+const WEBSITE_SYNC_ENDPOINT = `${BACKEND_URL}/sessions/website-sync`;
+
 let eventQueue = Promise.resolve();
+let websiteSyncPromise = null;
 
 function enqueue(task) {
   eventQueue = eventQueue.then(task).catch(error => {
@@ -19,6 +24,10 @@ function enqueue(task) {
   });
   return eventQueue;
 }
+
+// --------------------------------------------------
+// Extension lifecycle and browser events
+// --------------------------------------------------
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
@@ -29,16 +38,30 @@ chrome.runtime.onInstalled.addListener(() => {
     });
   });
 
-  chrome.alarms.create(CHECKPOINT_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.create(CHECKPOINT_ALARM, {
+    periodInMinutes: 1
+  });
 
   chrome.storage.local.get(["studyTopics", "studySites"], result => {
     const values = {};
-    if (!Array.isArray(result.studyTopics)) values.studyTopics = DEFAULT_TOPICS;
-    if (!Array.isArray(result.studySites)) values.studySites = [];
-    if (Object.keys(values).length) chrome.storage.local.set(values);
+
+    if (!Array.isArray(result.studyTopics)) {
+      values.studyTopics = DEFAULT_TOPICS;
+    }
+
+    if (!Array.isArray(result.studySites)) {
+      values.studySites = [];
+    }
+
+    if (Object.keys(values).length) {
+      chrome.storage.local.set(values);
+    }
   });
 
-  enqueue(syncActiveTab);
+  enqueue(async () => {
+    await syncActiveTab();
+    await syncWebsiteSessionsToBackend();
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -48,20 +71,28 @@ chrome.runtime.onStartup.addListener(() => {
 
     // Do not count time while the browser was closed.
     if (active) {
-      await finalizeActiveSession(active.lastCheckpointAt || active.startedAt);
+      await finalizeActiveSession(
+        active.lastCheckpointAt || active.startedAt
+      );
     }
 
     await syncActiveTab();
+    await syncWebsiteSessionsToBackend();
   });
 });
 
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === CHECKPOINT_ALARM) {
-    enqueue(() => checkpointActiveSession(Date.now()));
+    enqueue(async () => {
+      await checkpointActiveSession(Date.now());
+      await syncWebsiteSessionsToBackend();
+    });
   }
 });
 
-chrome.tabs.onActivated.addListener(() => enqueue(syncActiveTab));
+chrome.tabs.onActivated.addListener(() => {
+  enqueue(syncActiveTab);
+});
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url || changeInfo.status === "complete" || tab.active) {
@@ -69,7 +100,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener(() => enqueue(syncActiveTab));
+chrome.tabs.onRemoved.addListener(() => {
+  enqueue(syncActiveTab);
+});
 
 chrome.windows.onFocusChanged.addListener(windowId => {
   enqueue(async () => {
@@ -87,8 +120,13 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
+// --------------------------------------------------
+// Manual timer helpers
+// --------------------------------------------------
+
 async function getTimerState() {
   const { timerState } = await chrome.storage.local.get("timerState");
+
   return timerState
     ? { ...DEFAULT_STATE, ...timerState }
     : { ...DEFAULT_STATE };
@@ -98,6 +136,7 @@ function getElapsedMs(state) {
   if (state.status === "running" && state.startedAt) {
     return state.elapsedMs + (Date.now() - state.startedAt);
   }
+
   return state.elapsedMs;
 }
 
@@ -105,11 +144,19 @@ async function saveTimerState(state) {
   await chrome.storage.local.set({ timerState: state });
 }
 
+// --------------------------------------------------
+// Website tracking helpers
+// --------------------------------------------------
+
 function normalizeDomain(value) {
   const input = String(value || "").trim();
-  if (!input) throw new Error("Enter a website domain.");
+
+  if (!input) {
+    throw new Error("Enter a website domain.");
+  }
 
   let url;
+
   try {
     url = new URL(input.includes("://") ? input : `https://${input}`);
   } catch {
@@ -126,7 +173,11 @@ function normalizeDomain(value) {
 function getHostname(url) {
   try {
     const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) return null;
+
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return null;
+    }
+
     return parsed.hostname.toLowerCase().replace(/\.$/, "");
   } catch {
     return null;
@@ -148,7 +199,9 @@ function findSiteConfig(hostname, sites) {
 }
 
 async function getWebsiteSites() {
-  const { studySites = [] } = await chrome.storage.local.get("studySites");
+  const { studySites = [] } =
+    await chrome.storage.local.get("studySites");
+
   return Array.isArray(studySites) ? studySites : [];
 }
 
@@ -160,16 +213,136 @@ async function checkpointActiveSession(endTime = Date.now()) {
 
   const lastCheckpointAt =
     active.lastCheckpointAt || active.startedAt || endTime;
+
   const safeEndTime = Math.max(lastCheckpointAt, endTime);
 
   active.accumulatedMs = (active.accumulatedMs || 0) +
     Math.max(0, safeEndTime - lastCheckpointAt);
+
   active.lastCheckpointAt = safeEndTime;
 
-  await chrome.storage.local.set({ activeWebsiteSession: active });
+  await chrome.storage.local.set({
+    activeWebsiteSession: active
+  });
 }
 
-async function finalizeActiveSession(endTime = Date.now(), expectedDomain = null) {
+// --------------------------------------------------
+// Sync completed website sessions to the backend
+// --------------------------------------------------
+
+async function syncWebsiteSessionsToBackend() {
+  // Prevent overlapping sync requests.
+  if (websiteSyncPromise) {
+    return websiteSyncPromise;
+  }
+
+  websiteSyncPromise = (async () => {
+    const { studyWebsiteSessions = [] } =
+      await chrome.storage.local.get("studyWebsiteSessions");
+
+    if (
+      !Array.isArray(studyWebsiteSessions) ||
+      studyWebsiteSessions.length === 0
+    ) {
+      return {
+        success: true,
+        synced: 0,
+        message: "No website sessions to sync."
+      };
+    }
+
+    // The backend accepts up to 2000 items per request.
+    const sessions = studyWebsiteSessions
+      .filter(item =>
+        item &&
+        typeof item.id === "string" &&
+        item.id.length > 0 &&
+        typeof item.domain === "string" &&
+        item.startedAt &&
+        item.endedAt
+      )
+      .slice(0, MAX_SAVED_WEBSITE_SESSIONS);
+
+    if (sessions.length === 0) {
+      return {
+        success: true,
+        synced: 0,
+        message: "No valid website sessions to sync."
+      };
+    }
+
+    let synced = 0;
+
+    // Use batches so the extension remains safe if the storage limit changes.
+    for (let index = 0; index < sessions.length; index += 200) {
+      const batch = sessions.slice(index, index + 200);
+
+      const response = await fetch(WEBSITE_SYNC_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(batch.map(item => ({
+          id: item.id,
+          domain: item.domain,
+          subject: item.subject || "General",
+          durationSeconds: Math.max(
+            0,
+            Math.floor(Number(item.durationSeconds) || 0)
+          ),
+          startedAt: item.startedAt,
+          endedAt: item.endedAt
+        }))
+        )
+      });
+
+      if (!response.ok) {
+        const responseText = await response.text().catch(() => "");
+        throw new Error(
+          `Website session sync failed (${response.status}). ` +
+          responseText.slice(0, 300)
+        );
+      }
+
+      const result = await response.json();
+      synced += Number(result.inserted || 0);
+    }
+
+    console.log(
+      `StudyTrack: Website session sync finished. ` +
+      `${sessions.length} records checked; ${synced} new records inserted.`
+    );
+
+    return {
+      success: true,
+      checked: sessions.length,
+      inserted: synced
+    };
+  })();
+
+  try {
+    return await websiteSyncPromise;
+  } catch (error) {
+    // Do not remove local history on failure. A future checkpoint retries it.
+    console.warn("StudyTrack: Website session sync will retry later.", error);
+
+    return {
+      success: false,
+      error: error.message || "Website session sync failed."
+    };
+  } finally {
+    websiteSyncPromise = null;
+  }
+}
+
+// --------------------------------------------------
+// Finish and pause website sessions
+// --------------------------------------------------
+
+async function finalizeActiveSession(
+  endTime = Date.now(),
+  expectedDomain = null
+) {
   const { activeWebsiteSession: active } =
     await chrome.storage.local.get("activeWebsiteSession");
 
@@ -185,6 +358,7 @@ async function finalizeActiveSession(endTime = Date.now(), expectedDomain = null
 
   const lastCheckpointAt =
     active.lastCheckpointAt || active.startedAt || endTime;
+
   const safeEndTime = active.isPaused
     ? lastCheckpointAt
     : Math.max(lastCheckpointAt, endTime);
@@ -214,10 +388,19 @@ async function finalizeActiveSession(endTime = Date.now(), expectedDomain = null
         MAX_SAVED_WEBSITE_SESSIONS
       )
     });
+
+    // Start syncing after local history has been saved.
+    // Local history remains available if the backend is offline.
+    void syncWebsiteSessionsToBackend();
   }
 
   await chrome.storage.local.remove("activeWebsiteSession");
-  return { ...active, durationMs, endedAt: safeEndTime };
+
+  return {
+    ...active,
+    durationMs,
+    endedAt: safeEndTime
+  };
 }
 
 async function pauseActiveSession(pauseTime = Date.now()) {
@@ -228,14 +411,18 @@ async function pauseActiveSession(pauseTime = Date.now()) {
 
   const lastCheckpointAt =
     active.lastCheckpointAt || active.startedAt || pauseTime;
+
   const safePauseTime = Math.max(lastCheckpointAt, pauseTime);
 
   active.accumulatedMs = (active.accumulatedMs || 0) +
     Math.max(0, safePauseTime - lastCheckpointAt);
+
   active.lastCheckpointAt = safePauseTime;
   active.isPaused = true;
 
-  await chrome.storage.local.set({ activeWebsiteSession: active });
+  await chrome.storage.local.set({
+    activeWebsiteSession: active
+  });
 }
 
 async function resumeActiveSession(active, tab) {
@@ -250,41 +437,52 @@ async function resumeActiveSession(active, tab) {
   }
 
   const hostname = getHostname(tab.url);
-  if (!hostname || hostname !== active.hostname) return active;
+
+  if (!hostname || hostname !== active.hostname) {
+    return active;
+  }
 
   active.tabId = tab.id;
   active.windowId = tab.windowId;
   active.lastCheckpointAt = Date.now();
   active.isPaused = false;
 
-  await chrome.storage.local.set({ activeWebsiteSession: active });
+  await chrome.storage.local.set({
+    activeWebsiteSession: active
+  });
+
   return active;
 }
 
 /**
  * Automatically track whichever configured study website is currently active.
+ *
  * - A configured site in the focused browser window starts tracking.
- * - Switching to another configured site closes the previous session and starts
- *   a new one for the new site.
- * - Switching to a non-configured site or losing browser focus pauses tracking.
+ * - Switching to another configured study website completes the old session.
+ * - Switching to a non-configured website or losing browser focus pauses tracking.
  */
 async function syncActiveTab() {
   let tabs;
 
   try {
-    tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    tabs = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true
+    });
   } catch {
     await pauseActiveSession(Date.now());
     return;
   }
 
   const tab = tabs?.[0];
+
   if (!tab || tab.id == null || tab.windowId == null) {
     await pauseActiveSession(Date.now());
     return;
   }
 
   let windowInfo;
+
   try {
     windowInfo = await chrome.windows.get(tab.windowId);
   } catch {
@@ -296,15 +494,16 @@ async function syncActiveTab() {
   const focused = Boolean(windowInfo.focused);
   const sites = await getWebsiteSites();
   const siteConfig = focused ? findSiteConfig(hostname, sites) : null;
+
   const stored = await chrome.storage.local.get([
     "activeWebsiteSession",
     "stoppedWebsiteSession"
   ]);
+
   const active = stored.activeWebsiteSession || null;
   const stopped = stored.stoppedWebsiteSession || null;
 
-  // After the user presses Stop, don't auto-start again while they remain
-  // on the same tab. Leaving the tab/site clears this one-session suppression.
+  // After Stop, do not restart on the same tab until the user leaves it.
   const isSameStoppedTab = Boolean(
     stopped &&
     stopped.hostname === hostname &&
@@ -317,7 +516,9 @@ async function syncActiveTab() {
   }
 
   if (isSameStoppedTab) {
-    if (active) await pauseActiveSession(Date.now());
+    if (active) {
+      await pauseActiveSession(Date.now());
+    }
     return;
   }
 
@@ -334,14 +535,19 @@ async function syncActiveTab() {
   );
 
   if (isSameSession) {
-    if (active.isPaused) await resumeActiveSession(active, tab);
+    if (active.isPaused) {
+      await resumeActiveSession(active, tab);
+    }
     return;
   }
 
-  // Switching to another configured study website completes the old session.
-  if (active) await finalizeActiveSession(Date.now());
+  // Finish the previous website before tracking the new one.
+  if (active) {
+    await finalizeActiveSession(Date.now());
+  }
 
   const now = Date.now();
+
   const newActiveSession = {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -353,8 +559,14 @@ async function syncActiveTab() {
     isPaused: false
   };
 
-  await chrome.storage.local.set({ activeWebsiteSession: newActiveSession });
+  await chrome.storage.local.set({
+    activeWebsiteSession: newActiveSession
+  });
 }
+
+// --------------------------------------------------
+// Notes and topics
+// --------------------------------------------------
 
 async function getNoteTopics() {
   const { studyTopics = [], studyNotes = [] } =
@@ -379,12 +591,16 @@ async function getNoteTopics() {
 async function createNoteTopic(topicName) {
   const name = String(topicName || "").trim();
 
-  if (!name) throw new Error("Enter a topic name.");
+  if (!name) {
+    throw new Error("Enter a topic name.");
+  }
+
   if (name.length > 50) {
     throw new Error("Topic names must be 50 characters or fewer.");
   }
 
   const topics = await getNoteTopics();
+
   const existing = topics.find(
     topic => topic.toLowerCase() === name.toLowerCase()
   );
@@ -392,7 +608,11 @@ async function createNoteTopic(topicName) {
   if (existing) return existing;
 
   topics.push(name);
-  await chrome.storage.local.set({ studyTopics: topics });
+
+  await chrome.storage.local.set({
+    studyTopics: topics
+  });
+
   return name;
 }
 
@@ -424,61 +644,66 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
     topic: chosenTopic,
     url: String(url || "").slice(0, 2000),
     pageTitle: safePageTitle,
-    createdAt: new Date().toISOString(),
-    backendId: null,
-    syncStatus: "pending"
+    createdAt: new Date().toISOString()
   };
 
-  // Save locally first, so a backend problem doesn't lose the note.
+  // Save locally first so the extension keeps its existing behavior.
   studyNotes.unshift(note);
   await chrome.storage.local.set({ studyNotes });
 
-  // Attempt to sync the note with FastAPI.
+  // Find the matching backend topic ID, if that topic exists.
+  let topicId = null;
+
   try {
-    const response = await fetch("http://127.0.0.1:8000/notes", {
+    const response = await fetch("http://127.0.0.1:8000/topics");
+
+    if (response.ok) {
+      const topics = await response.json();
+      const matchingTopic = topics.find(
+        item =>
+          item.name.toLowerCase() === chosenTopic.toLowerCase()
+      );
+
+      if (matchingTopic) {
+        topicId = matchingTopic.id;
+      }
+    }
+
+    const saveResponse = await fetch("http://127.0.0.1:8000/notes", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        title: note.title,
+        title: note.title || "Untitled note",
         content: note.text,
-        topic_id: null
+        topic_id: topicId
       })
     });
 
-    if (!response.ok) {
-      throw new Error(`Backend returned HTTP ${response.status}`);
+    if (!saveResponse.ok) {
+      const errorText = await saveResponse.text();
+      console.error("StudyTrack: Backend note save failed:", errorText);
+      throw new Error("Note saved locally, but backend sync failed.");
     }
 
-    const savedNote = await response.json();
+    const savedBackendNote = await saveResponse.json();
 
-    note.backendId = savedNote.id;
-    note.syncStatus = "synced";
-
-    // Update the locally stored version with its backend ID.
-    const stored = await chrome.storage.local.get("studyNotes");
-    const currentNotes = Array.isArray(stored.studyNotes)
-      ? stored.studyNotes
-      : [];
-
-    const updatedNotes = currentNotes.map(item =>
-      item.id === note.id ? note : item
+    console.log(
+      "StudyTrack: Note saved to backend.",
+      savedBackendNote.id
     );
 
-    await chrome.storage.local.set({
-      studyNotes: updatedNotes
-    });
+    return {
+      ...note,
+      backendId: savedBackendNote.id
+    };
   } catch (error) {
-    console.warn(
-      "StudyTrack: Note saved locally but backend sync failed.",
-      error
-    );
-    // Keep the note locally with syncStatus: "pending".
+    console.error("StudyTrack: Note sync failed:", error);
+    throw error;
   }
-
-  return note;
 }
+
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== SAVE_SELECTION_MENU_ID) return;
@@ -500,11 +725,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
+// --------------------------------------------------
+// Messages from popup and content scripts
+// --------------------------------------------------
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
     .then(sendResponse)
     .catch(error => {
       console.error("StudyTrack background error:", error);
+
       sendResponse({
         success: false,
         error: error.message || "Something went wrong."
@@ -524,6 +754,7 @@ async function handleMessage(message, sender) {
 
     case "CREATE_NOTE_TOPIC": {
       const topic = await createNoteTopic(message.topic);
+
       return {
         success: true,
         topic,
@@ -540,21 +771,37 @@ async function handleMessage(message, sender) {
         topic: message.topic
       });
 
-      return { success: true, note };
+      return {
+        success: true,
+        note
+      };
     }
 
     case "GET_WEBSITE_TRACKING_DATA": {
-      // Re-check the active tab whenever the popup asks for tracking status.
       await enqueue(syncActiveTab);
 
-      const { activeWebsiteSession: active, stoppedWebsiteSession: stopped } =
-        await chrome.storage.local.get(["activeWebsiteSession", "stoppedWebsiteSession"]);
+      // Try syncing existing history when the popup opens too.
+      void syncWebsiteSessionsToBackend();
 
-      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+      const {
+        activeWebsiteSession: active,
+        stoppedWebsiteSession: stopped
+      } = await chrome.storage.local.get([
+        "activeWebsiteSession",
+        "stoppedWebsiteSession"
+      ]);
+
+      const tabs = await chrome.tabs.query({
+        active: true,
+        lastFocusedWindow: true
+      }).catch(() => []);
+
       const currentTab = tabs?.[0];
       const currentHostname = getHostname(currentTab?.url);
+
       const isStoppedHere = Boolean(
-        stopped && currentTab &&
+        stopped &&
+        currentTab &&
         stopped.hostname === currentHostname &&
         stopped.tabId === currentTab.id &&
         stopped.windowId === currentTab.windowId
@@ -581,13 +828,12 @@ async function handleMessage(message, sender) {
       };
     }
 
-    // Kept for compatibility with older popup scripts or other extension files.
+    // Kept for compatibility with older popup scripts.
     // The popup no longer shows an Add Website form.
     case "ADD_STUDY_SITE": {
       const domain = normalizeDomain(message.domain);
       const subject = String(message.subject || "DSA").trim();
       const sites = await getWebsiteSites();
-      const existing = sites.find(site => site.domain === domain);
 
       let site = sites.find(item => item.domain === domain);
 
@@ -602,12 +848,22 @@ async function handleMessage(message, sender) {
         sites.push(site);
       }
 
-      await chrome.storage.local.set({ studySites: sites });
+      await chrome.storage.local.set({
+        studySites: sites
+      });
+
       await chrome.storage.local.remove("stoppedWebsiteSession");
       await enqueue(syncActiveTab);
+
       const { activeWebsiteSession: active } =
         await chrome.storage.local.get("activeWebsiteSession");
-      return { success: true, sites, site, active: active || null };
+
+      return {
+        success: true,
+        sites,
+        site,
+        active: active || null
+      };
     }
 
     case "START_WEBSITE_SESSION": {
@@ -657,7 +913,11 @@ async function handleMessage(message, sender) {
         existing.subject = subject;
         existing.enabled = true;
       } else {
-        sites.push({ domain, subject, enabled: true });
+        sites.push({
+          domain,
+          subject,
+          enabled: true
+        });
       }
 
       const now = Date.now();
@@ -674,24 +934,32 @@ async function handleMessage(message, sender) {
       };
 
       await chrome.storage.local.remove("stoppedWebsiteSession");
+
       await chrome.storage.local.set({
         studySites: sites,
         activeWebsiteSession: active
       });
 
-      return { success: true, sites, active };
+      return {
+        success: true,
+        sites,
+        active
+      };
     }
 
     case "STOP_WEBSITE_SESSION": {
       const domain = normalizeDomain(message.domain);
+
       const { activeWebsiteSession: current } =
         await chrome.storage.local.get("activeWebsiteSession");
+
       const tab = sender?.tab;
-      const stoppedHostname = current?.hostname || getHostname(tab?.url) || domain;
+      const stoppedHostname =
+        current?.hostname || getHostname(tab?.url) || domain;
+
       const completed = await finalizeActiveSession(Date.now(), domain);
 
-      // Prevent syncActiveTab from immediately creating another session on
-      // the same tab after Stop. Switching away clears this flag.
+      // Prevent tracking from restarting on the same tab immediately.
       if (tab?.id != null && tab?.windowId != null) {
         await chrome.storage.local.set({
           stoppedWebsiteSession: {
@@ -702,6 +970,9 @@ async function handleMessage(message, sender) {
           }
         });
       }
+
+      // Also attempt to sync immediately after Stop.
+      void syncWebsiteSessionsToBackend();
 
       return {
         success: true,
@@ -719,23 +990,40 @@ async function handleMessage(message, sender) {
     case "REMOVE_STUDY_SITE": {
       const domain = normalizeDomain(message.domain);
 
-      // Save any active time before removing the site from the list.
+      // Save active time before removing the site from the list.
       await finalizeActiveSession(Date.now(), domain);
 
       const sites = (await getWebsiteSites())
         .filter(site => site.domain !== domain);
-      await chrome.storage.local.set({ studySites: sites });
+
+      await chrome.storage.local.set({
+        studySites: sites
+      });
 
       const { stoppedWebsiteSession: stopped } =
         await chrome.storage.local.get("stoppedWebsiteSession");
-      if (stopped && (
-        stopped.hostname === domain || stopped.hostname.endsWith(`.${domain}`)
-      )) {
+
+      if (
+        stopped &&
+        (
+          stopped.hostname === domain ||
+          stopped.hostname.endsWith(`.${domain}`)
+        )
+      ) {
         await chrome.storage.local.remove("stoppedWebsiteSession");
       }
 
-      return { success: true, sites };
+      void syncWebsiteSessionsToBackend();
+
+      return {
+        success: true,
+        sites
+      };
     }
+
+    // --------------------------------------------------
+    // Manual timer actions
+    // --------------------------------------------------
 
     case "GET_TIMER_STATE": {
       const state = await getTimerState();
@@ -780,6 +1068,7 @@ async function handleMessage(message, sender) {
         state.elapsedMs = getElapsedMs(state);
         state.status = "paused";
         state.startedAt = null;
+
         await saveTimerState(state);
       }
 
@@ -806,10 +1095,16 @@ async function handleMessage(message, sender) {
           endedAt: new Date().toISOString()
         });
 
-        await chrome.storage.local.set({ studySessions });
+        await chrome.storage.local.set({
+          studySessions
+        });
       }
 
-      state = { ...DEFAULT_STATE, subject: state.subject };
+      state = {
+        ...DEFAULT_STATE,
+        subject: state.subject
+      };
+
       await saveTimerState(state);
 
       return {
@@ -821,6 +1116,9 @@ async function handleMessage(message, sender) {
     }
 
     default:
-      return { success: false, error: "Unknown action" };
+      return {
+        success: false,
+        error: "Unknown action"
+      };
   }
 }

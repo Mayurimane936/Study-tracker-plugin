@@ -1,4 +1,3 @@
-
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Generator, Optional
@@ -71,6 +70,13 @@ class StudySession(Base):
     __tablename__ = "study_sessions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+
+    # Unique ID from the browser extension. NULL for ordinary/manual sessions.
+    source_session_id: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
     subject: Mapped[str] = mapped_column(
         String(100), default="General"
     )
@@ -120,6 +126,30 @@ class Note(Base):
 # Create missing tables without deleting existing data.
 Base.metadata.create_all(bind=engine)
 
+# Safely add the new column to an existing PostgreSQL database.
+# Existing records receive NULL, so manual sessions remain unchanged.
+with engine.begin() as connection:
+    connection.execute(
+        text(
+            """
+            ALTER TABLE study_sessions
+            ADD COLUMN IF NOT EXISTS source_session_id VARCHAR(100)
+            """
+        )
+    )
+
+    # Prevent a browser session from being imported more than once.
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            ix_study_sessions_source_session_id
+            ON study_sessions (source_session_id)
+            WHERE source_session_id IS NOT NULL
+            """
+        )
+    )
+
 
 # --------------------------------------------------
 # API schemas
@@ -162,6 +192,16 @@ class StudySessionOut(BaseModel):
     topic_id: Optional[int]
 
 
+class WebsiteSessionSyncItem(BaseModel):
+    # Must remain stable between sync attempts.
+    id: str = Field(min_length=1, max_length=100)
+    domain: str = Field(min_length=1, max_length=253)
+    subject: str = Field(default="General", max_length=100)
+    durationSeconds: int = Field(ge=0)
+    startedAt: datetime
+    endedAt: datetime
+
+
 class NoteCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     content: str = ""
@@ -192,7 +232,7 @@ class NoteOut(BaseModel):
 app = FastAPI(
     title="StudyTrack API",
     description="Backend for the StudyTrack browser extension and dashboard.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -295,14 +335,23 @@ def create_session(
 ):
     verify_topic(db, data.topic_id)
 
+    started_at = normalize_datetime(data.started_at)
+    ended_at = (
+        normalize_datetime(data.ended_at)
+        if data.ended_at else None
+    )
+
+    if ended_at and ended_at < started_at:
+        raise HTTPException(
+            status_code=422,
+            detail="Session end time cannot precede its start time.",
+        )
+
     session = StudySession(
         subject=data.subject.strip() or "General",
         duration_seconds=data.duration_seconds,
-        started_at=normalize_datetime(data.started_at),
-        ended_at=(
-            normalize_datetime(data.ended_at)
-            if data.ended_at else None
-        ),
+        started_at=started_at,
+        ended_at=ended_at,
         site_url=data.site_url,
         site_title=data.site_title,
         topic_id=data.topic_id,
@@ -312,6 +361,110 @@ def create_session(
     db.commit()
     db.refresh(session)
     return session
+
+
+@app.post("/sessions/website-sync")
+def sync_website_sessions(
+    items: list[WebsiteSessionSyncItem],
+    db: Session = Depends(get_db),
+):
+    """
+    Import completed website sessions from the browser extension.
+
+    Repeated IDs are skipped so retrying a sync does not inflate totals.
+    """
+    if len(items) > 2000:
+        raise HTTPException(
+            status_code=422,
+            detail="A maximum of 2000 sessions can be synced at once.",
+        )
+
+    # If a batch accidentally contains the same ID multiple times,
+    # process it only once.
+    unique_items = {}
+    for item in items:
+        unique_items[item.id] = item
+
+    inserted = 0
+    skipped = 0
+
+    try:
+        for item in unique_items.values():
+            existing = db.scalar(
+                select(StudySession.id).where(
+                    StudySession.source_session_id == item.id
+                )
+            )
+
+            if existing is not None:
+                skipped += 1
+                continue
+
+            domain = item.domain.strip().lower().rstrip(".")
+            subject = item.subject.strip() or "General"
+
+            if not domain:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Website domain cannot be empty.",
+                )
+
+            # Store a hostname, not a URL supplied by arbitrary input.
+            if (
+                "://" in domain
+                or "/" in domain
+                or " " in domain
+                or len(domain) > 253
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Please provide a valid website domain.",
+                )
+
+            started_at = normalize_datetime(item.startedAt)
+            ended_at = normalize_datetime(item.endedAt)
+
+            if ended_at < started_at:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Session end time cannot precede its start time.",
+                )
+
+            session = StudySession(
+                source_session_id=item.id,
+                subject=subject[:100],
+                duration_seconds=item.durationSeconds,
+                started_at=started_at,
+                ended_at=ended_at,
+                site_url=f"https://{domain}",
+                site_title=domain[:500],
+                topic_id=None,
+            )
+
+            db.add(session)
+            inserted += 1
+
+        db.commit()
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not save website sessions. "
+                "Please retry the sync."
+            ),
+        )
+
+    return {
+        "message": "Website session sync completed.",
+        "received": len(items),
+        "inserted": inserted,
+        "skipped": skipped,
+    }
 
 
 @app.get("/sessions", response_model=list[StudySessionOut])
