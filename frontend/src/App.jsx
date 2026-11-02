@@ -154,6 +154,77 @@ function SessionTable({ sessions, loading }) {
   );
 }
 
+function sessionDomain(session) {
+  if (session.domain?.trim()) return session.domain.trim();
+  try {
+    return session.site_url ? new URL(session.site_url).hostname.replace(/^www\./, "") : "General";
+  } catch {
+    return "General";
+  }
+}
+
+function GroupedSessions({ sessions, loading }) {
+  if (loading && sessions.length === 0) {
+    return <div className="table-loading"><LoaderCircle className="spin" size={22} /> Loading sessions...</div>;
+  }
+  if (!sessions.length) {
+    return <EmptyState icon={Clock3} title="No study sessions yet"
+      description="Your saved sessions will appear here when they're recorded." />;
+  }
+
+  const grouped = new Map();
+  sessions.forEach((session) => {
+    const topic = session.topic || session.subject || "General";
+    const domain = sessionDomain(session);
+    if (!grouped.has(topic)) grouped.set(topic, new Map());
+    const domains = grouped.get(topic);
+    if (!domains.has(domain)) domains.set(domain, []);
+    domains.get(domain).push(session);
+  });
+
+  const topicGroups = [...grouped.entries()].map(([topic, domains]) => {
+    const domainGroups = [...domains.entries()].map(([domain, items]) => ({
+      domain,
+      sessions: items.sort((a, b) => new Date(b.started_at) - new Date(a.started_at)),
+      seconds: items.reduce((total, item) => total + (Number(item.duration_seconds) || 0), 0),
+    })).sort((a, b) => a.domain.localeCompare(b.domain));
+    return {
+      topic,
+      domains: domainGroups,
+      count: domainGroups.reduce((total, group) => total + group.sessions.length, 0),
+      seconds: domainGroups.reduce((total, group) => total + group.seconds, 0),
+    };
+  }).sort((a, b) => b.seconds - a.seconds || a.topic.localeCompare(b.topic));
+
+  return <div className="session-topic-list">
+    {topicGroups.map((topicGroup) => <details className="session-topic-group" key={topicGroup.topic}>
+      <summary>
+        <span className="session-topic-title"><BookOpen size={17} />{topicGroup.topic}</span>
+        <span className="session-group-meta">{topicGroup.count} sessions</span>
+        <strong>{formatDuration(topicGroup.seconds)}</strong>
+      </summary>
+      <div className="session-domain-list">
+        {topicGroup.domains.map((domainGroup) => <details className="session-domain-group" key={domainGroup.domain}>
+          <summary>
+            <span>{domainGroup.domain}</span>
+            <span className="session-group-meta">{domainGroup.sessions.length} sessions</span>
+            <strong>{formatDuration(domainGroup.seconds)}</strong>
+          </summary>
+          <div className="session-entry-list">
+            {domainGroup.sessions.map((session) => <article className="session-entry" key={session.id}>
+              <div className="session-entry-main">
+                <strong>{session.site_title || session.site_url || "Study session"}</strong>
+                <span>{formatDate(session.started_at)} · {formatTime(session.started_at)}</span>
+              </div>
+              <strong className="duration-value">{formatDuration(session.duration_seconds)}</strong>
+            </article>)}
+          </div>
+        </details>)}
+      </div>
+    </details>)}
+  </div>;
+}
+
 function AuthWelcome({ onAuthenticate, busy, error }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -706,7 +777,7 @@ export default function App() {
               <button className="secondary-button" onClick={cleanupOldSessions}><Trash2 size={16} /> Clean time older than 90 days</button>
             </div>
             <SearchBox value={search} onChange={setSearch} />
-            <SessionTable sessions={filteredSessions} loading={loading} />
+            <GroupedSessions sessions={filteredSessions} loading={loading} />
           </section>}
 
           {activePage === "notes" && <section className="panel page-panel">
