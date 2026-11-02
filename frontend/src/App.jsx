@@ -777,8 +777,8 @@ export default function App() {
 
           {activePage === "sessions" && <section className="panel page-panel">
             <div className="panel-heading page-panel-heading">
-              <div><h2>All study sessions</h2><p>{sessions.length} sessions recorded in this workspace</p></div>
-              <button className="secondary-button" onClick={cleanupOldSessions}><Trash2 size={16} /> Clean time older than 90 days</button>
+              <div><h2>All study sessions</h2><p>{sessions.length} sessions recorded in this workspace · records older than 90 days are removed automatically; notes are kept</p></div>
+              <button className="secondary-button" onClick={cleanupOldSessions}><Trash2 size={16} /> Clean up now</button>
             </div>
             <SearchBox value={search} onChange={setSearch} />
             <GroupedSessions sessions={filteredSessions} loading={loading} />

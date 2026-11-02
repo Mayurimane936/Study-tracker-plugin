@@ -99,6 +99,14 @@ async function syncManualStudySessionsToBackend() {
       });
 
       if (!response.ok) {
+        if (response.status === 410) {
+          const { studySessions: current = [] } =
+            await chrome.storage.local.get("studySessions");
+          await chrome.storage.local.set({
+            studySessions: current.filter(session => session.id !== item.id)
+          });
+          continue;
+        }
         throw new Error(`Manual session sync failed (${response.status}).`);
       }
 

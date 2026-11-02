@@ -6,6 +6,9 @@ import base64
 import hashlib
 import secrets
 import calendar
+import asyncio
+import logging
+from contextlib import suppress
 
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
@@ -34,6 +37,10 @@ from sqlalchemy.orm import (
     Session,
     sessionmaker,
 )
+
+logger = logging.getLogger("studytrack.retention")
+SESSION_RETENTION_DAYS = 90
+_retention_task = None
 
 # ============================================================
 # CONFIGURATION
@@ -681,6 +688,9 @@ def save_round_winner(
             CompetitionRoundWinner.period_start == start,
         )
     )
+    if record and record.period_end == end:
+        return record
+
     board = group_period_rows(group_id, start, end, db)
     winner = next((row for row in board if row["seconds"] > 0), None)
 
@@ -744,6 +754,58 @@ def aware_datetime(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc)
 
     return value
+
+
+def prune_expired_sessions(user_id: Optional[int] = None) -> int:
+    db = SessionLocal()
+    try:
+        groups_query = select(StudyGroup)
+        if user_id is not None:
+            groups_query = (
+                groups_query
+                .join(Membership, Membership.group_id == StudyGroup.id)
+                .where(Membership.user_id == user_id)
+            )
+
+        for group in db.scalars(groups_query).all():
+            finalize_completed_rounds(group, db)
+            finalize_completed_months(group, db)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=SESSION_RETENTION_DAYS
+        )
+        statement = (
+            "DELETE FROM st_sessions WHERE ended_at < :cutoff"
+        )
+        parameters = {"cutoff": cutoff}
+        if user_id is not None:
+            statement += " AND user_id = :user_id"
+            parameters["user_id"] = user_id
+
+        result = db.execute(text(statement), parameters)
+        db.commit()
+        return result.rowcount or 0
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+async def session_retention_loop():
+    while True:
+        try:
+            deleted = await asyncio.to_thread(prune_expired_sessions)
+            if deleted:
+                logger.info(
+                    "Removed %s study sessions older than %s days.",
+                    deleted,
+                    SESSION_RETENTION_DAYS,
+                )
+        except Exception:
+            logger.exception("Automatic session retention failed.")
+
+        await asyncio.sleep(24 * 60 * 60)
 
 
 # ============================================================
@@ -1262,6 +1324,15 @@ def create_session(
             detail="Session end time cannot be before its start time.",
         )
 
+    retention_cutoff = datetime.now(timezone.utc) - timedelta(
+        days=SESSION_RETENTION_DAYS
+    )
+    if ended < retention_cutoff:
+        raise HTTPException(
+            status_code=410,
+            detail="This session is older than the 90-day retention window.",
+        )
+
     session = StudySession(
         user_id=user.id,
         group_id=data.group_id,
@@ -1289,6 +1360,7 @@ def website_sync(
     db: Session = Depends(get_db),
 ):
     saved = 0
+    expired = 0
 
     for item in items:
         workspace_group(item.group_id, user, db)
@@ -1321,6 +1393,13 @@ def website_sync(
         if ended < started:
             continue
 
+        retention_cutoff = datetime.now(timezone.utc) - timedelta(
+            days=SESSION_RETENTION_DAYS
+        )
+        if ended < retention_cutoff:
+            expired += 1
+            continue
+
         session = StudySession(
             user_id=user.id,
             group_id=item.group_id,
@@ -1338,7 +1417,7 @@ def website_sync(
 
     db.commit()
 
-    return {"saved": saved}
+    return {"saved": saved, "expired": expired}
 
 
 @app.get("/sessions")
@@ -1701,32 +1780,24 @@ def round_winners(
 @app.post("/maintenance/cleanup-old-sessions")
 def cleanup_old_sessions(
     user: User = Depends(current_user),
-    db: Session = Depends(get_db),
 ):
-    # Delete sessions older than 90 days.
-    # Notes and monthly competition winner records remain untouched.
-    groups = db.scalars(
-        select(StudyGroup)
-        .join(Membership, Membership.group_id == StudyGroup.id)
-        .where(Membership.user_id == user.id)
-    ).all()
-    for group in groups:
-        finalize_completed_rounds(group, db)
-        finalize_completed_months(group, db)
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
-
-    result = db.execute(
-        text(
-            "DELETE FROM st_sessions "
-            "WHERE user_id = :user_id AND ended_at < :cutoff"
-        ),
-        {"user_id": user.id, "cutoff": cutoff},
-    )
-
-    db.commit()
-
     return {
-        "deleted_sessions": result.rowcount or 0,
-        "retention_days": 90,
+        "deleted_sessions": prune_expired_sessions(user.id),
+        "retention_days": SESSION_RETENTION_DAYS,
     }
+
+
+@app.on_event("startup")
+async def start_session_retention():
+    global _retention_task
+    _retention_task = asyncio.create_task(session_retention_loop())
+
+
+@app.on_event("shutdown")
+async def stop_session_retention():
+    global _retention_task
+    if _retention_task is not None:
+        _retention_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _retention_task
+        _retention_task = None
