@@ -33,13 +33,20 @@ async function authenticatedFetch(path, options = {}) {
     throw new Error("Connect your StudyTrack account to sync data.");
   }
 
-  return fetch(`${BACKEND_URL}${path}`, {
+  const response = await fetch(`${BACKEND_URL}${path}`, {
     ...options,
     headers: {
       ...options.headers,
       Authorization: `Bearer ${studyTrackAuth.token}`
     }
   });
+
+  if (response.status === 401) {
+    await chrome.storage.local.remove("studyTrackAuth");
+    throw new Error("StudyTrack login expired. Reconnect your account in the extension popup.");
+  }
+
+  return response;
 }
 
 async function connectAccount(email, password) {
@@ -57,6 +64,10 @@ async function connectAccount(email, password) {
   await chrome.storage.local.set({
     studyTrackAuth: { token: data.token, user: data.user }
   });
+
+  void syncWebsiteSessionsToBackend();
+  void syncManualStudySessionsToBackend();
+  void syncLocalNotesToBackend();
 
   return data.user;
 }
@@ -79,7 +90,7 @@ async function syncManualStudySessionsToBackend() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source_session_id: item.id,
-          group_id: item.groupId || null,
+          group_id: item.groupId ?? await selectedGroupId(),
           topic: item.subject || "General",
           duration_seconds: item.durationSeconds,
           started_at: item.startedAt,
@@ -106,6 +117,49 @@ async function syncManualStudySessionsToBackend() {
   } finally {
     manualSyncPromise = null;
   }
+}
+
+async function syncLocalNotesToBackend() {
+  const { studyTrackAuth, studyNotes = [] } =
+    await chrome.storage.local.get(["studyTrackAuth", "studyNotes"]);
+  if (!studyTrackAuth?.token || !Array.isArray(studyNotes)) return new Set();
+
+  const syncedKey = `studyTrackSyncedNotes_${studyTrackAuth.user.id}`;
+  const stored = await chrome.storage.local.get(syncedKey);
+  const syncedIds = new Set(stored[syncedKey] || []);
+
+  for (const note of studyNotes) {
+    if (!note?.id || syncedIds.has(note.id)) continue;
+
+    try {
+      const response = await authenticatedFetch("/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: note.title || "Untitled note",
+          content: note.text || note.content || "",
+          topic: note.topic || note.subject || "General",
+          domain: note.domain || "General",
+          group_id: note.groupId || await selectedGroupId()
+        })
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Note sync failed (${response.status}). ${detail}`);
+      }
+
+      syncedIds.add(note.id);
+      await chrome.storage.local.set({
+        [syncedKey]: [...syncedIds]
+      });
+    } catch (error) {
+      if (error.message.includes("login expired")) break;
+      console.warn("StudyTrack: Note remains saved locally and will retry.", error);
+      break;
+    }
+  }
+
+  return syncedIds;
 }
 
 function enqueue(task) {
@@ -177,6 +231,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
       await checkpointActiveSession(Date.now());
       await syncWebsiteSessionsToBackend();
       await syncManualStudySessionsToBackend();
+      await syncLocalNotesToBackend();
     });
   }
 });
@@ -377,6 +432,7 @@ async function syncWebsiteSessionsToBackend() {
     // Use batches so the extension remains safe if the storage limit changes.
     for (let index = 0; index < sessions.length; index += 200) {
       const batch = sessions.slice(index, index + 200);
+      const currentGroupId = await selectedGroupId();
 
       const response = await authenticatedFetch("/sessions/website-sync", {
         method: "POST",
@@ -387,7 +443,7 @@ async function syncWebsiteSessionsToBackend() {
           id: item.id,
           domain: item.domain,
           subject: item.subject || "General",
-          group_id: item.groupId || null,
+          group_id: item.groupId ?? currentGroupId,
           durationSeconds: Math.max(
             0,
             Math.floor(Number(item.durationSeconds) || 0)
@@ -409,6 +465,15 @@ async function syncWebsiteSessionsToBackend() {
       const result = await response.json();
       synced += Number(result.inserted ?? result.saved ?? 0);
     }
+
+    const syncedIds = new Set(sessions.map(item => item.id));
+    const { studyWebsiteSessions: currentSessions = [] } =
+      await chrome.storage.local.get("studyWebsiteSessions");
+    await chrome.storage.local.set({
+      studyWebsiteSessions: currentSessions.filter(
+        item => !syncedIds.has(item.id)
+      )
+    });
 
     console.log(
       `StudyTrack: Website session sync finished. ` +
@@ -755,49 +820,8 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
   studyNotes.unshift(note);
   await chrome.storage.local.set({ studyNotes });
 
-  const { studyTrackAuth } =
-    await chrome.storage.local.get("studyTrackAuth");
-
-  if (!studyTrackAuth?.token) {
-    return note;
-  }
-
-  try {
-    const saveResponse = await authenticatedFetch("/notes", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        title: note.title || "Untitled note",
-        content: note.text,
-          topic: chosenTopic,
-          domain: "General",
-          group_id: await selectedGroupId()
-      })
-    });
-
-    if (!saveResponse.ok) {
-      const errorText = await saveResponse.text();
-      console.error("StudyTrack: Backend note save failed:", errorText);
-      throw new Error("Note saved locally, but backend sync failed.");
-    }
-
-    const savedBackendNote = await saveResponse.json();
-
-    console.log(
-      "StudyTrack: Note saved to backend.",
-      savedBackendNote.id
-    );
-
-    return {
-      ...note,
-      backendId: savedBackendNote.id
-    };
-  } catch (error) {
-    console.error("StudyTrack: Note sync failed:", error);
-    throw error;
-  }
+  const syncedIds = await syncLocalNotesToBackend();
+  return { ...note, synced: syncedIds.has(note.id) };
 }
 
 
@@ -1059,6 +1083,7 @@ async function handleMessage(message, sender) {
         windowId: tab.windowId,
         hostname: senderDomain,
         subject,
+        groupId: await selectedGroupId(),
         startedAt: now,
         lastCheckpointAt: now,
         accumulatedMs: 0,

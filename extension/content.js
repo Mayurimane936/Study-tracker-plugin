@@ -556,7 +556,9 @@
 
       selectedTopic = response.note?.topic || topic;
 
-      setStatus(`Saved to "${selectedTopic}".`);
+      setStatus(response.note?.synced
+        ? `Saved and synced to "${selectedTopic}".`
+        : `Saved locally to "${selectedTopic}". Connect the extension account to sync.`);
 
       setTimeout(hideUI, 1100);
     } catch (error) {

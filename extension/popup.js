@@ -585,7 +585,7 @@ saveNoteBtn.addEventListener("click", async () => {
       currentWindow: true
     });
 
-    await sendMessage({
+    const saved = await sendMessage({
       action: "SAVE_NOTE_FROM_PAGE",
       text,
       title: noteTitle.value.trim() || tab?.title || "Untitled note",
@@ -597,7 +597,9 @@ saveNoteBtn.addEventListener("click", async () => {
     noteText.value = "";
     noteTitle.value = "";
 
-    setStatus(noteStatus, "Note saved in this browser.");
+    setStatus(noteStatus, saved.note?.synced
+      ? "Note saved and synced to StudyTrack."
+      : "Note saved locally. Connect the extension account to sync it.");
 
     await loadTopics();
     await renderNotes();
@@ -612,11 +614,16 @@ saveNoteBtn.addEventListener("click", async () => {
 
 async function initialize() {
   try {
-    const account = await sendMessage({ action: "GET_ACCOUNT_STATE" });
+    let account = await sendMessage({ action: "GET_ACCOUNT_STATE" });
     let groups = [];
     if (account.user) {
-      const response = await sendMessage({ action: "GET_ACCOUNT_GROUPS" });
-      groups = response.groups;
+      try {
+        const response = await sendMessage({ action: "GET_ACCOUNT_GROUPS" });
+        groups = response.groups;
+      } catch (error) {
+        account = await sendMessage({ action: "GET_ACCOUNT_STATE" });
+        setStatus(accountStatus, error.message, true);
+      }
     }
     renderAccount(account.user, groups, account.groupId);
     await initializeTimer();
