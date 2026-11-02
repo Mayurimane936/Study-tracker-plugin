@@ -3,6 +3,7 @@
   "name": "StudyTrack",
   "version": "0.6.1",
   "description": "Track study time and save learning notes.",
+  "minimum_chrome_version": "109",
   "permissions": [
     "activeTab",
     "scripting",
@@ -12,6 +13,7 @@
     "alarms"
   ],
   "host_permissions": [
+    "https://studytrack.example.com/api/*",
     "http://127.0.0.1:8000/*",
     "http://localhost:8000/*"
   ],

@@ -1,3 +1,5 @@
+importScripts("deployment-config.js");
+
 const DEFAULT_STATE = {
   status: "idle",
   subject: "DSA",
@@ -13,7 +15,7 @@ const CHECKPOINT_ALARM = "studytrack-website-checkpoint";
 const MAX_SAVED_WEBSITE_SESSIONS = 2000;
 
 // Must match the backend address used by your local StudyTrack server.
-const BACKEND_URL = "http://127.0.0.1:8000";
+const BACKEND_URL = globalThis.STUDYTRACK_API_URL || "http://127.0.0.1:8000";
 
 let eventQueue = Promise.resolve();
 let websiteSyncPromise = null;

@@ -8,7 +8,7 @@ import secrets
 import calendar
 import asyncio
 import logging
-from contextlib import suppress
+from contextlib import suppress, asynccontextmanager
 
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
@@ -882,16 +882,38 @@ class WebsiteSyncItem(BaseModel):
 # FASTAPI APP
 # ============================================================
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _retention_task
+    _retention_task = asyncio.create_task(session_retention_loop())
+    try:
+        yield
+    finally:
+        if _retention_task is not None:
+            _retention_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await _retention_task
+            _retention_task = None
+
+
+api_docs_enabled = os.getenv("ENABLE_API_DOCS", "false").strip().lower() in {
+    "1", "true", "yes"
+}
+
 app = FastAPI(
     title="StudyTrack API",
     version="2.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if api_docs_enabled else None,
+    redoc_url="/redoc" if api_docs_enabled else None,
+    openapi_url="/openapi.json" if api_docs_enabled else None,
 )
 
 origins = [
     origin.strip()
     for origin in os.getenv(
         "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
+        "",
     ).split(",")
     if origin.strip()
 ]
@@ -916,7 +938,17 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as error:
+        logger.exception("Health check database query failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable.",
+        ) from error
+
+    return {"status": "ok", "database": "ok"}
 
 
 # ============================================================
@@ -1785,19 +1817,3 @@ def cleanup_old_sessions(
         "deleted_sessions": prune_expired_sessions(user.id),
         "retention_days": SESSION_RETENTION_DAYS,
     }
-
-
-@app.on_event("startup")
-async def start_session_retention():
-    global _retention_task
-    _retention_task = asyncio.create_task(session_retention_loop())
-
-
-@app.on_event("shutdown")
-async def stop_session_retention():
-    global _retention_task
-    if _retention_task is not None:
-        _retention_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _retention_task
-        _retention_task = None
