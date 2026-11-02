@@ -1,6 +1,15 @@
 
 const timerDisplay = document.getElementById("timer");
 const timerStatus = document.getElementById("timerStatus");
+const accountForm = document.getElementById("accountForm");
+const accountEmail = document.getElementById("accountEmail");
+const accountPassword = document.getElementById("accountPassword");
+const connectAccountBtn = document.getElementById("connectAccountBtn");
+const disconnectAccountBtn = document.getElementById("disconnectAccountBtn");
+const accountUser = document.getElementById("accountUser");
+const accountStatus = document.getElementById("accountStatus");
+const syncGroupPicker = document.getElementById("syncGroupPicker");
+const syncGroupSelect = document.getElementById("syncGroupSelect");
 const subjectSelect = document.getElementById("subject");
 const startBtn = document.getElementById("startBtn");
 const pauseBtn = document.getElementById("pauseBtn");
@@ -67,6 +76,75 @@ async function sendMessage(message) {
 
   return response;
 }
+
+function renderAccount(user, groups = [], selectedGroupId = "") {
+  const connected = Boolean(user);
+  accountForm.hidden = connected;
+  disconnectAccountBtn.hidden = !connected;
+  accountUser.hidden = !connected;
+  syncGroupPicker.hidden = !connected;
+  accountUser.textContent = connected
+    ? `Connected as ${user.email}`
+    : "";
+
+  syncGroupSelect.replaceChildren(
+    new Option("Personal workspace", "")
+  );
+  groups.forEach(group => {
+    syncGroupSelect.appendChild(new Option(group.name, String(group.id)));
+  });
+  syncGroupSelect.value = groups.some(
+    group => String(group.id) === String(selectedGroupId)
+  ) ? String(selectedGroupId) : "";
+}
+
+accountForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  connectAccountBtn.disabled = true;
+
+  try {
+    const result = await sendMessage({
+      action: "CONNECT_ACCOUNT",
+      email: accountEmail.value.trim(),
+      password: accountPassword.value
+    });
+    const [groups, account] = await Promise.all([
+      sendMessage({ action: "GET_ACCOUNT_GROUPS" }),
+      sendMessage({ action: "GET_ACCOUNT_STATE" })
+    ]);
+    accountPassword.value = "";
+    renderAccount(result.user, groups.groups, account.groupId);
+    setStatus(accountStatus, "Account connected.");
+    await refreshAutomaticTracking();
+  } catch (error) {
+    setStatus(accountStatus, error.message, true);
+  } finally {
+    connectAccountBtn.disabled = false;
+  }
+});
+
+disconnectAccountBtn.addEventListener("click", async () => {
+  try {
+    await sendMessage({ action: "DISCONNECT_ACCOUNT" });
+    await sendMessage({ action: "SET_SYNC_GROUP", groupId: null });
+    renderAccount(null);
+    setStatus(accountStatus, "Account disconnected.");
+  } catch (error) {
+    setStatus(accountStatus, error.message, true);
+  }
+});
+
+syncGroupSelect.addEventListener("change", async () => {
+  try {
+    await sendMessage({
+      action: "SET_SYNC_GROUP",
+      groupId: syncGroupSelect.value || null
+    });
+    setStatus(accountStatus, "Session workspace updated.");
+  } catch (error) {
+    setStatus(accountStatus, error.message, true);
+  }
+});
 
 // -------------------- Topics --------------------
 
@@ -534,6 +612,13 @@ saveNoteBtn.addEventListener("click", async () => {
 
 async function initialize() {
   try {
+    const account = await sendMessage({ action: "GET_ACCOUNT_STATE" });
+    let groups = [];
+    if (account.user) {
+      const response = await sendMessage({ action: "GET_ACCOUNT_GROUPS" });
+      groups = response.groups;
+    }
+    renderAccount(account.user, groups, account.groupId);
     await initializeTimer();
     await loadTopics();
     await renderNotes();

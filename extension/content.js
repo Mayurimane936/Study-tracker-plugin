@@ -513,11 +513,13 @@
   });
 
   document.addEventListener("keyup", event => {
+    const key = typeof event.key === "string" ? event.key : "";
+
     if (
-      event.key === "Shift" ||
-      event.key.startsWith("Arrow") ||
-      event.key === "End" ||
-      event.key === "Home"
+      key === "Shift" ||
+      key.startsWith("Arrow") ||
+      key === "End" ||
+      key === "Home"
     ) {
       setTimeout(inspectSelection, 10);
     }

@@ -1,0 +1,159 @@
+import os
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time as time_module
+from datetime import date, datetime, timedelta, timezone
+from typing import Generator, Optional
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, func, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL")
+SECRET_KEY = os.getenv("STUDYTRACK_SECRET_KEY")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is missing from backend/.env")
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise RuntimeError(
+        "STUDYTRACK_SECRET_KEY is missing or too short. Generate one with: "
+        'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
+
+engine_options = {"pool_pre_ping": True}
+if DATABASE_URL.startswith("sqlite"):
+    engine_options["connect_args"] = {"check_same_thread": False}
+engine = create_engine(DATABASE_URL, **engine_options)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+# ---------------------------------------------------------------------------
+# Database models
+# ---------------------------------------------------------------------------
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class Topic(Base):
+    __tablename__ = "topics"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class StudySession(Base):
+    __tablename__ = "study_sessions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_session_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    subject: Mapped[str] = mapped_column(String(100), nullable=False, default="Other")
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    site_url: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    site_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    topic_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("topics.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class Note(Base):
+    __tablename__ = "notes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="Untitled note")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    topic_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("topics.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+Base.metadata.create_all(bind=engine)
+
+
+def run_database_migrations() -> None:
+    """Additive migration for browser-session sync; does not drop existing data."""
+    with engine.begin() as connection:
+        if engine.dialect.name == "postgresql":
+            connection.execute(text(
+                "ALTER TABLE study_sessions ADD COLUMN IF NOT EXISTS source_session_id VARCHAR(100)"
+            ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_study_sessions_source_session_id "
+                "ON study_sessions (source_session_id) WHERE source_session_id IS NOT NULL"
+            ))
+        elif engine.dialect.name == "sqlite":
+            columns = connection.execute(text("PRAGMA table_info(study_sessions)")).all()
+            if "source_session_id" not in {row[1] for row in columns}:
+                connection.execute(text(
+                    "ALTER TABLE study_sessions ADD COLUMN source_session_id VARCHAR(100)"
+                ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_study_sessions_source_session_id "
+                "ON study_sessions (source_session_id) WHERE source_session_id IS NOT NULL"
+            ))
+
+
+run_database_migrations()
+
+
+# ---------------------------------------------------------------------------
+# Request/response schemas
+# ---------------------------------------------------------------------------
+class RegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    email: str
+    created_at: datetime
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+class TopicCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)

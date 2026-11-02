@@ -3,7 +3,8 @@ const DEFAULT_STATE = {
   subject: "DSA",
   elapsedMs: 0,
   startedAt: null,
-  sessionStartedAt: null
+  sessionStartedAt: null,
+  groupId: null
 };
 
 const DEFAULT_TOPICS = ["DSA", "C++", "System Design", "Other"];
@@ -13,10 +14,99 @@ const MAX_SAVED_WEBSITE_SESSIONS = 2000;
 
 // Must match the backend address used by your local StudyTrack server.
 const BACKEND_URL = "http://127.0.0.1:8000";
-const WEBSITE_SYNC_ENDPOINT = `${BACKEND_URL}/sessions/website-sync`;
 
 let eventQueue = Promise.resolve();
 let websiteSyncPromise = null;
+let manualSyncPromise = null;
+
+async function selectedGroupId() {
+  const { studyTrackGroupId } =
+    await chrome.storage.local.get("studyTrackGroupId");
+  return studyTrackGroupId ? Number(studyTrackGroupId) : null;
+}
+
+async function authenticatedFetch(path, options = {}) {
+  const { studyTrackAuth } =
+    await chrome.storage.local.get("studyTrackAuth");
+
+  if (!studyTrackAuth?.token) {
+    throw new Error("Connect your StudyTrack account to sync data.");
+  }
+
+  return fetch(`${BACKEND_URL}${path}`, {
+    ...options,
+    headers: {
+      ...options.headers,
+      Authorization: `Bearer ${studyTrackAuth.token}`
+    }
+  });
+}
+
+async function connectAccount(email, password) {
+  const response = await fetch(`${BACKEND_URL}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password })
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data.token || !data.user) {
+    throw new Error(data.detail || "Could not connect to StudyTrack.");
+  }
+
+  await chrome.storage.local.set({
+    studyTrackAuth: { token: data.token, user: data.user }
+  });
+
+  return data.user;
+}
+
+async function syncManualStudySessionsToBackend() {
+  if (manualSyncPromise) return manualSyncPromise;
+
+  manualSyncPromise = (async () => {
+    const { studyTrackAuth, studySessions = [] } =
+      await chrome.storage.local.get([
+        "studyTrackAuth",
+        "studySessions"
+      ]);
+
+    if (!studyTrackAuth?.token || !Array.isArray(studySessions)) return;
+
+    for (const item of studySessions) {
+      const response = await authenticatedFetch("/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_session_id: item.id,
+          group_id: item.groupId || null,
+          topic: item.subject || "General",
+          duration_seconds: item.durationSeconds,
+          started_at: item.startedAt,
+          ended_at: item.endedAt
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Manual session sync failed (${response.status}).`);
+      }
+
+      const { studySessions: current = [] } =
+        await chrome.storage.local.get("studySessions");
+      await chrome.storage.local.set({
+        studySessions: current.filter(session => session.id !== item.id)
+      });
+    }
+  })();
+
+  try {
+    await manualSyncPromise;
+  } catch (error) {
+    console.warn("StudyTrack: Manual session sync will retry later.", error);
+  } finally {
+    manualSyncPromise = null;
+  }
+}
 
 function enqueue(task) {
   eventQueue = eventQueue.then(task).catch(error => {
@@ -86,6 +176,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
     enqueue(async () => {
       await checkpointActiveSession(Date.now());
       await syncWebsiteSessionsToBackend();
+      await syncManualStudySessionsToBackend();
     });
   }
 });
@@ -237,6 +328,16 @@ async function syncWebsiteSessionsToBackend() {
   }
 
   websiteSyncPromise = (async () => {
+    const { studyTrackAuth } =
+      await chrome.storage.local.get("studyTrackAuth");
+
+    if (!studyTrackAuth?.token) {
+      return {
+        success: false,
+        error: "Connect your StudyTrack account to sync website sessions."
+      };
+    }
+
     const { studyWebsiteSessions = [] } =
       await chrome.storage.local.get("studyWebsiteSessions");
 
@@ -277,7 +378,7 @@ async function syncWebsiteSessionsToBackend() {
     for (let index = 0; index < sessions.length; index += 200) {
       const batch = sessions.slice(index, index + 200);
 
-      const response = await fetch(WEBSITE_SYNC_ENDPOINT, {
+      const response = await authenticatedFetch("/sessions/website-sync", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -286,6 +387,7 @@ async function syncWebsiteSessionsToBackend() {
           id: item.id,
           domain: item.domain,
           subject: item.subject || "General",
+          group_id: item.groupId || null,
           durationSeconds: Math.max(
             0,
             Math.floor(Number(item.durationSeconds) || 0)
@@ -305,7 +407,7 @@ async function syncWebsiteSessionsToBackend() {
       }
 
       const result = await response.json();
-      synced += Number(result.inserted || 0);
+      synced += Number(result.inserted ?? result.saved ?? 0);
     }
 
     console.log(
@@ -377,6 +479,7 @@ async function finalizeActiveSession(
       id: crypto.randomUUID(),
       domain: active.hostname,
       subject: active.subject || "DSA",
+      groupId: active.groupId || null,
       durationSeconds: Math.floor(durationMs / 1000),
       startedAt: new Date(active.startedAt).toISOString(),
       endedAt: new Date(safeEndTime).toISOString()
@@ -553,6 +656,7 @@ async function syncActiveTab() {
     windowId: tab.windowId,
     hostname,
     subject: String(siteConfig.subject || "DSA").trim() || "DSA",
+    groupId: await selectedGroupId(),
     startedAt: now,
     lastCheckpointAt: now,
     accumulatedMs: 0,
@@ -651,25 +755,15 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
   studyNotes.unshift(note);
   await chrome.storage.local.set({ studyNotes });
 
-  // Find the matching backend topic ID, if that topic exists.
-  let topicId = null;
+  const { studyTrackAuth } =
+    await chrome.storage.local.get("studyTrackAuth");
+
+  if (!studyTrackAuth?.token) {
+    return note;
+  }
 
   try {
-    const response = await fetch("http://127.0.0.1:8000/topics");
-
-    if (response.ok) {
-      const topics = await response.json();
-      const matchingTopic = topics.find(
-        item =>
-          item.name.toLowerCase() === chosenTopic.toLowerCase()
-      );
-
-      if (matchingTopic) {
-        topicId = matchingTopic.id;
-      }
-    }
-
-    const saveResponse = await fetch("http://127.0.0.1:8000/notes", {
+    const saveResponse = await authenticatedFetch("/notes", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -677,7 +771,9 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
       body: JSON.stringify({
         title: note.title || "Untitled note",
         content: note.text,
-        topic_id: topicId
+          topic: chosenTopic,
+          domain: "General",
+          group_id: await selectedGroupId()
       })
     });
 
@@ -746,6 +842,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleMessage(message, sender) {
   switch (message.action) {
+    case "GET_ACCOUNT_STATE": {
+      const { studyTrackAuth, studyTrackGroupId } =
+        await chrome.storage.local.get([
+          "studyTrackAuth",
+          "studyTrackGroupId"
+        ]);
+
+      return {
+        success: true,
+        user: studyTrackAuth?.user || null,
+        groupId: studyTrackGroupId || ""
+      };
+    }
+
+    case "GET_ACCOUNT_GROUPS": {
+      const response = await authenticatedFetch("/groups");
+      if (!response.ok) throw new Error("Could not load your groups.");
+      return { success: true, groups: await response.json() };
+    }
+
+    case "SET_SYNC_GROUP": {
+      const groupId = message.groupId ? Number(message.groupId) : null;
+      await chrome.storage.local.set({ studyTrackGroupId: groupId });
+      return { success: true, groupId };
+    }
+
+    case "CONNECT_ACCOUNT":
+      return {
+        success: true,
+        user: await connectAccount(message.email, message.password)
+      };
+
+    case "DISCONNECT_ACCOUNT":
+      await chrome.storage.local.remove("studyTrackAuth");
+      return { success: true };
+
     case "GET_NOTE_TOPICS":
       return {
         success: true,
@@ -1026,6 +1158,7 @@ async function handleMessage(message, sender) {
     // --------------------------------------------------
 
     case "GET_TIMER_STATE": {
+      void syncManualStudySessionsToBackend();
       const state = await getTimerState();
 
       return {
@@ -1040,6 +1173,7 @@ async function handleMessage(message, sender) {
 
       if (state.status !== "running") {
         const isNewSession = state.status === "idle";
+        const selectedGroup = await selectedGroupId();
 
         state = {
           ...state,
@@ -1048,7 +1182,10 @@ async function handleMessage(message, sender) {
           startedAt: Date.now(),
           sessionStartedAt: isNewSession
             ? new Date().toISOString()
-            : state.sessionStartedAt || new Date().toISOString()
+            : state.sessionStartedAt || new Date().toISOString(),
+          groupId: isNewSession
+            ? selectedGroup
+            : state.groupId ?? selectedGroup
         };
 
         await saveTimerState(state);
@@ -1089,6 +1226,7 @@ async function handleMessage(message, sender) {
 
         studySessions.unshift({
           id: crypto.randomUUID(),
+          groupId: state.groupId || null,
           subject: state.subject,
           durationSeconds: Math.floor(durationMs / 1000),
           startedAt: state.sessionStartedAt,
@@ -1098,6 +1236,7 @@ async function handleMessage(message, sender) {
         await chrome.storage.local.set({
           studySessions
         });
+        void syncManualStudySessionsToBackend();
       }
 
       state = {
