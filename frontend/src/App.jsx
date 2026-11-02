@@ -320,6 +320,7 @@ export default function App() {
   );
   const [leaderboard, setLeaderboard] = useState(null);
   const [winners, setWinners] = useState([]);
+  const [roundWinners, setRoundWinners] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -401,18 +402,21 @@ export default function App() {
       setNotes(noteData);
       setTopics(topicData);
       if (activeGroupId) {
-        const [boardResponse, winnerResponse] = await Promise.all([
+        const [boardResponse, winnerResponse, roundWinnerResponse] = await Promise.all([
           apiFetch(profile.token, `/groups/${activeGroupId}/leaderboard`),
           apiFetch(profile.token, `/groups/${activeGroupId}/winners`),
+          apiFetch(profile.token, `/groups/${activeGroupId}/round-winners`),
         ]);
-        if (!boardResponse.ok || !winnerResponse.ok) {
-          throw new Error("Could not load this group's weekly challenge.");
+        if (!boardResponse.ok || !winnerResponse.ok || !roundWinnerResponse.ok) {
+          throw new Error("Could not load this group's competition results.");
         }
         setLeaderboard(await boardResponse.json());
         setWinners(await winnerResponse.json());
+        setRoundWinners(await roundWinnerResponse.json());
       } else {
         setLeaderboard(null);
         setWinners([]);
+        setRoundWinners([]);
       }
     } catch (err) {
       setError(err.message || "Couldn't connect to StudyTrack. Check the backend.");
@@ -614,7 +618,7 @@ export default function App() {
   }
 
   async function cleanupOldSessions() {
-    if (!window.confirm("Delete your study sessions older than 90 days? Notes and weekly winners will be kept.")) return;
+    if (!window.confirm("Delete your study sessions older than 90 days? Notes and monthly winners will be kept.")) return;
     try {
       const response = await apiFetch(
         profile.token,
@@ -641,7 +645,7 @@ export default function App() {
     sessions: ["Study sessions", "Review the time you've spent learning."],
     notes: ["My notes", "Keep your learning and ideas in one place."],
     topics: ["Your topics", "Organize your learning by subject."],
-    competition: ["Weekly competition", "Track your group's four-week study challenge."],
+    competition: ["Date-round competition", "Track 1–8 day rounds and your group’s monthly champion."],
   };
   const [pageTitle, pageSubtitle] = pageTitles[activePage];
 
@@ -842,11 +846,11 @@ export default function App() {
 
           {activePage === "competition" && <>
             {!activeGroupId ? <section className="panel page-panel">
-              <EmptyState icon={Users} title="Choose a group workspace" description="Create a group or join with an invite code to view the weekly standings and winners." />
+              <EmptyState icon={Users} title="Choose a group workspace" description="Create a group or join with an invite code to view date-round standings and monthly winners." />
               <div className="competition-actions"><button className="primary-button" onClick={() => setGroupDialog("create")}><Plus size={16} /> Create group</button><button className="secondary-button" onClick={() => setGroupDialog("join")}><Users size={16} /> Join group</button></div>
             </section> : <>
               <section className="panel page-panel">
-                <div className="panel-heading page-panel-heading"><div><span className="modal-kicker">MONDAY TO SUNDAY</span><h2>{groups.find((group) => String(group.id) === activeGroupId)?.name || "Group"} standings</h2><p>Current week: {formatDate(leaderboard?.period_start)} – {formatDate(leaderboard?.period_end)}</p></div><Trophy size={24} /></div>
+                <div className="panel-heading page-panel-heading"><div><span className="modal-kicker">DATE ROUND STANDINGS</span><h2>{groups.find((group) => String(group.id) === activeGroupId)?.name || "Group"}</h2><p>Current round: {formatDate(leaderboard?.period_start)} – {formatDate(leaderboard?.period_end)}</p><p>Monthly champion counts study time from {formatDate(leaderboard?.month_start)} to {formatDate(leaderboard?.month_end)}.</p></div><Trophy size={24} /></div>
                 <div className="invite-code-row"><span>Invite code</span><strong>{groups.find((group) => String(group.id) === activeGroupId)?.invite_code || ""}</strong><span>Share this code with your group</span></div>
                 <div className="table-scroll"><table className="sessions-table"><thead><tr><th>RANK</th><th>MEMBER</th><th>STUDY TIME</th></tr></thead><tbody>
                   {(leaderboard?.leaderboard || []).map((member, index) => <tr key={member.user_id}><td>{index + 1}</td><td><strong>{member.name}</strong></td><td>{formatDuration(member.seconds)}</td></tr>)}
@@ -854,10 +858,23 @@ export default function App() {
                 </tbody></table></div>
               </section>
               <section className="panel page-panel winner-history">
-                <div className="panel-heading page-panel-heading"><div><h2>Four-week winners</h2><p>Each completed week is saved permanently, even when old time records are cleaned up.</p></div><Trophy size={20} /></div>
+                <div className="panel-heading page-panel-heading"><div><h2>Date-round winners</h2><p>Each completed date block gets its own winner: 1–8, 9–16, 17–24, and 25–month-end.</p></div><Trophy size={20} /></div>
+                {roundWinners.length ? <div className="winner-list">{roundWinners.map((winner, index) => <article className="winner-row" key={winner.period_start}>
+                  <span className="winner-rank">{index + 1}</span><div><strong>{winner.winner}</strong><span>{formatDate(winner.period_start)} – {formatDate(winner.period_end)}</span></div><b>{formatDuration(winner.seconds)}</b>
+                </article>)}</div> : <EmptyState icon={Trophy} title="First round winner is pending" description="The current round winner is saved after its date range closes." />}
+              </section>
+              <section className="panel page-panel winner-history">
+                <div className="panel-heading page-panel-heading"><div><h2>Monthly champion</h2><p>The champion is decided from the full month’s group study time and saved after month-end.</p></div><Trophy size={20} /></div>
+                <div className="monthly-winner-status">
+                  <span>This month</span>
+                  {leaderboard?.month_winner
+                    ? <><strong>{leaderboard.month_winner.name}</strong><b>{formatDuration(leaderboard.month_winner.seconds)}</b></>
+                    : <strong>Winner announced after {formatDate(leaderboard?.month_end)}</strong>}
+                </div>
+                <div className="panel-heading page-panel-heading monthly-history-heading"><div><h3>Recent monthly winners</h3><p>Saved winner records stay available if time data is cleaned up.</p></div></div>
                 {winners.length ? <div className="winner-list">{winners.map((winner, index) => <article className="winner-row" key={winner.period_start}>
                   <span className="winner-rank">{index + 1}</span><div><strong>{winner.winner}</strong><span>{formatDate(winner.period_start)} – {formatDate(winner.period_end)}</span></div><b>{formatDuration(winner.seconds)}</b>
-                </article>)}</div> : <EmptyState icon={Trophy} title="First winner is pending" description="The winner is recorded automatically when the current Monday–Sunday week closes." />}
+                </article>)}</div> : <EmptyState icon={Trophy} title="No monthly champion yet" description="The current month stays open until its final day." />}
               </section>
             </>}
           </>}

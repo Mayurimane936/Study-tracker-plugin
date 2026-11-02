@@ -5,6 +5,7 @@ import json
 import base64
 import hashlib
 import secrets
+import calendar
 
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
@@ -343,6 +344,39 @@ class CompetitionWinner(Base):
     )
 
 
+class CompetitionRoundWinner(Base):
+    __tablename__ = "st_competition_round_winners"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("st_groups.id", ondelete="CASCADE"),
+        index=True,
+    )
+    period_start: Mapped[date] = mapped_column(Date, index=True)
+    period_end: Mapped[date] = mapped_column(Date)
+    winner_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("st_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    winner_name: Mapped[str] = mapped_column(String(80))
+    winning_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    saved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "period_start",
+            name="uq_st_round_winner_period",
+        ),
+    )
+
+
 Base.metadata.create_all(engine)
 
 
@@ -524,11 +558,24 @@ def workspace_group(
 
 
 def period_for(day: date):
-    start = day - timedelta(days=day.weekday())
-    return start, start + timedelta(days=6)
+    month_end = date(
+        day.year,
+        day.month,
+        calendar.monthrange(day.year, day.month)[1],
+    )
+    start_day = ((day.day - 1) // 8) * 8 + 1
+    start = day.replace(day=start_day)
+    end = min(start_day + 7, month_end.day)
+    return start, day.replace(day=end)
 
 
-def group_week_rows(
+def month_for(day: date):
+    start = day.replace(day=1)
+    end = day.replace(day=calendar.monthrange(day.year, day.month)[1])
+    return start, end
+
+
+def group_period_rows(
     group_id: int,
     start: date,
     end: date,
@@ -568,7 +615,7 @@ def group_week_rows(
     return sorted(rows, key=lambda row: (-row["seconds"], row["name"].lower()))
 
 
-def save_week_winner(
+def save_month_winner(
     group_id: int,
     start: date,
     end: date,
@@ -580,38 +627,92 @@ def save_week_winner(
             CompetitionWinner.period_start == start,
         )
     )
-    if record:
+    if record and record.period_end == end:
         return record
 
-    board = group_week_rows(group_id, start, end, db)
+    board = group_period_rows(group_id, start, end, db)
     winner = next((row for row in board if row["seconds"] > 0), None)
-    record = CompetitionWinner(
-        group_id=group_id,
-        period_start=start,
-        period_end=end,
-        winner_user_id=winner["user_id"] if winner else None,
-        winner_name=winner["name"] if winner else "No activity",
-        winning_seconds=winner["seconds"] if winner else 0,
-    )
-    db.add(record)
+    if record:
+        record.period_end = end
+        record.winner_user_id = winner["user_id"] if winner else None
+        record.winner_name = winner["name"] if winner else "No activity"
+        record.winning_seconds = winner["seconds"] if winner else 0
+    else:
+        record = CompetitionWinner(
+            group_id=group_id,
+            period_start=start,
+            period_end=end,
+            winner_user_id=winner["user_id"] if winner else None,
+            winner_name=winner["name"] if winner else "No activity",
+            winning_seconds=winner["seconds"] if winner else 0,
+        )
+        db.add(record)
     db.commit()
     db.refresh(record)
     return record
 
 
-def finalize_completed_weeks(group: StudyGroup, db: Session):
-    current_start, _ = period_for(date.today())
-    first_start, _ = period_for(group.created_at.date())
-    week_start = first_start
+def finalize_completed_months(group: StudyGroup, db: Session):
+    current_month_start, _ = month_for(date.today())
+    first_month_start, _ = month_for(group.created_at.date())
+    month_start = first_month_start
 
-    while week_start < current_start:
-        save_week_winner(
+    while month_start < current_month_start:
+        _, month_end = month_for(month_start)
+        save_month_winner(
             group.id,
-            week_start,
-            week_start + timedelta(days=6),
+            month_start,
+            month_end,
             db,
         )
-        week_start += timedelta(days=7)
+        next_month = month_end + timedelta(days=1)
+        month_start = next_month
+
+
+def save_round_winner(
+    group_id: int,
+    start: date,
+    end: date,
+    db: Session,
+):
+    record = db.scalar(
+        select(CompetitionRoundWinner).where(
+            CompetitionRoundWinner.group_id == group_id,
+            CompetitionRoundWinner.period_start == start,
+        )
+    )
+    board = group_period_rows(group_id, start, end, db)
+    winner = next((row for row in board if row["seconds"] > 0), None)
+
+    if record:
+        record.period_end = end
+        record.winner_user_id = winner["user_id"] if winner else None
+        record.winner_name = winner["name"] if winner else "No activity"
+        record.winning_seconds = winner["seconds"] if winner else 0
+    else:
+        record = CompetitionRoundWinner(
+            group_id=group_id,
+            period_start=start,
+            period_end=end,
+            winner_user_id=winner["user_id"] if winner else None,
+            winner_name=winner["name"] if winner else "No activity",
+            winning_seconds=winner["seconds"] if winner else 0,
+        )
+        db.add(record)
+
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def finalize_completed_rounds(group: StudyGroup, db: Session):
+    current_start, _ = period_for(date.today())
+    round_start, _ = period_for(group.created_at.date())
+
+    while round_start < current_start:
+        _, round_end = period_for(round_start)
+        save_round_winner(group.id, round_start, round_end, db)
+        round_start = round_end + timedelta(days=1)
 
 
 def add_starter_dsa_topic(
@@ -1463,7 +1564,7 @@ def dashboard(
 
 
 # ============================================================
-# GROUP LEADERBOARD AND COMPETITION WINNERS
+# GROUP DATE ROUNDS AND MONTHLY WINNERS
 # ============================================================
 
 @app.get("/groups/{group_id}/leaderboard")
@@ -1474,24 +1575,28 @@ def leaderboard(
 ):
     workspace_group(group_id, user, db)
     group = db.get(StudyGroup, group_id)
-    finalize_completed_weeks(group, db)
+    finalize_completed_rounds(group, db)
+    finalize_completed_months(group, db)
     start, end = period_for(date.today())
-    rows = group_week_rows(group_id, start, end, db)
-
-    saved = db.scalar(
+    rows = group_period_rows(group_id, start, end, db)
+    month_start, month_end = month_for(date.today())
+    monthly_winner = db.scalar(
         select(CompetitionWinner).where(
             CompetitionWinner.group_id == group_id,
-            CompetitionWinner.period_start == start,
+            CompetitionWinner.period_start == month_start,
+            CompetitionWinner.period_end == month_end,
         )
     )
 
     return {
         "period_start": start.isoformat(),
         "period_end": end.isoformat(),
+        "month_start": month_start.isoformat(),
+        "month_end": month_end.isoformat(),
         "leaderboard": rows,
-        "winner": None if saved is None else {
-            "name": saved.winner_name,
-            "seconds": saved.winning_seconds,
+        "month_winner": None if monthly_winner is None else {
+            "name": monthly_winner.winner_name,
+            "seconds": monthly_winner.winning_seconds,
         },
     }
 
@@ -1510,16 +1615,16 @@ def finalize_period(
             detail="Only the group creator can finalize a competition period.",
         )
 
-    current_start, _ = period_for(date.today())
-    start = current_start - timedelta(days=7)
-    end = start + timedelta(days=6)
+    current_month_start, _ = month_for(date.today())
+    start, end = month_for(current_month_start - timedelta(days=1))
     existing = db.scalar(
         select(CompetitionWinner).where(
             CompetitionWinner.group_id == group_id,
             CompetitionWinner.period_start == start,
+            CompetitionWinner.period_end == end,
         )
     )
-    record = save_week_winner(group_id, start, end, db)
+    record = save_month_winner(group_id, start, end, db)
 
     return {
         "winner": record.winner_name,
@@ -1538,13 +1643,44 @@ def winners(
 ):
     workspace_group(group_id, user, db)
     group = db.get(StudyGroup, group_id)
-    finalize_completed_weeks(group, db)
+    finalize_completed_months(group, db)
 
-    records = db.scalars(
+    stored_records = db.scalars(
         select(CompetitionWinner)
         .where(CompetitionWinner.group_id == group_id)
         .order_by(CompetitionWinner.period_start.desc())
-        .limit(4)
+    ).all()
+    records = [
+        record for record in stored_records
+        if month_for(record.period_start)[1] == record.period_end
+    ][:4]
+
+    return [
+        {
+            "period_start": record.period_start.isoformat(),
+            "period_end": record.period_end.isoformat(),
+            "winner": record.winner_name,
+            "seconds": record.winning_seconds,
+        }
+        for record in records
+    ]
+
+
+@app.get("/groups/{group_id}/round-winners")
+def round_winners(
+    group_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(group_id, user, db)
+    group = db.get(StudyGroup, group_id)
+    finalize_completed_rounds(group, db)
+
+    records = db.scalars(
+        select(CompetitionRoundWinner)
+        .where(CompetitionRoundWinner.group_id == group_id)
+        .order_by(CompetitionRoundWinner.period_start.desc())
+        .limit(12)
     ).all()
 
     return [
@@ -1568,14 +1704,15 @@ def cleanup_old_sessions(
     db: Session = Depends(get_db),
 ):
     # Delete sessions older than 90 days.
-    # Notes and competition winner records remain untouched.
+    # Notes and monthly competition winner records remain untouched.
     groups = db.scalars(
         select(StudyGroup)
         .join(Membership, Membership.group_id == StudyGroup.id)
         .where(Membership.user_id == user.id)
     ).all()
     for group in groups:
-        finalize_completed_weeks(group, db)
+        finalize_completed_rounds(group, db)
+        finalize_completed_months(group, db)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=90)
 

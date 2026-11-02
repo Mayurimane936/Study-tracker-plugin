@@ -1896,6 +1896,41 @@ h1 {
   display: grid;
 }
 
+.monthly-winner-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 18px 0 24px;
+  color: #77748c;
+  font-size: 10px;
+  background: #f7f6fb;
+  border-radius: 8px;
+}
+
+.monthly-winner-status strong {
+  color: #514d68;
+  font-size: 12px;
+}
+
+.monthly-winner-status b {
+  margin-left: auto;
+  color: #60577f;
+  font-size: 11px;
+}
+
+.monthly-history-heading {
+  margin-top: 20px;
+}
+
+.monthly-history-heading h3 {
+  margin: 0;
+  color: #514d68;
+  font-family: "Manrope", sans-serif;
+  font-size: 13px;
+}
+
 .winner-row {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr) auto;
