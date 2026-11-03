@@ -32,7 +32,9 @@ The API health endpoint is `https://YOUR_RENDER_BACKEND/health`. Free Render ser
 
 ### 4. Allow the deployed frontend
 
-In Render, set the backend environment variable `CORS_ORIGINS` to the exact Vercel production origin, then redeploy the backend. Do not set it to `*` for an authenticated app.
+In Render, set the backend environment variable `CORS_ORIGINS` to the exact Vercel production origin, then redeploy the backend. Do not set it to `*` for an authenticated app. All people opening that same deployed URL share the same origin; a different computer by itself does not need another CORS entry.
+
+If collaborators use Vercel preview deployments for this project, optionally set `CORS_ORIGIN_REGEX` in Render to `^https://study-tracker-plugin(?:-[a-z0-9-]+)?\.vercel\.app$`. This only matches HTTPS origins under this Vercel project slug. For a custom domain or local development, add each exact origin to the comma-separated `CORS_ORIGINS` value instead. After changing either setting, wait for the Render service to redeploy.
 
 ### 5. Connect the extension
 

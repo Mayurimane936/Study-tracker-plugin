@@ -15,5 +15,7 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         sync: false
+      - key: CORS_ORIGIN_REGEX
+        sync: false
       - key: ENABLE_API_DOCS
         value: "false"
