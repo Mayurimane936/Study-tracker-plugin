@@ -1538,10 +1538,9 @@ def list_notes(
 ):
     workspace_group(group_id, user, db)
 
-    query = select(NotePage).where(
-        NotePage.user_id == user.id,
-        NotePage.group_id == group_id,
-    )
+    query = select(NotePage).where(NotePage.group_id == group_id)
+    if group_id is None:
+        query = query.where(NotePage.user_id == user.id)
 
     if search.strip():
         pattern = f"%{search.strip()}%"
@@ -1557,7 +1556,13 @@ def list_notes(
         query.order_by(NotePage.updated_at.desc())
     ).all()
 
-    return [note_json(note) for note in notes]
+    return [
+        {
+            **note_json(note),
+            "can_edit": note.user_id == user.id,
+        }
+        for note in notes
+    ]
 
 
 @app.put("/notes/{note_id}")

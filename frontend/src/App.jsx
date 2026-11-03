@@ -504,15 +504,15 @@ export default function App() {
         profile.token,
         noteForm.id ? `/notes/${noteForm.id}` : "/notes",
         {
-        method: noteForm.id ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: noteForm.title.trim(),
-          content: noteForm.content,
-          topic: noteForm.topic || "General",
-          domain: noteForm.domain || "General",
-          group_id: activeGroupId ? Number(activeGroupId) : null,
-        }),
+          method: noteForm.id ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: noteForm.title.trim(),
+            content: noteForm.content,
+            topic: noteForm.topic || "General",
+            domain: noteForm.domain || "General",
+            group_id: activeGroupId ? Number(activeGroupId) : null,
+          }),
         }
       );
       const data = await response.json();
@@ -795,10 +795,12 @@ export default function App() {
                   <div className="topic-group-heading"><div><h3>{topic.name}</h3><span>{pages.length} pages</span></div><button className="text-button" onClick={() => startNotePage(topic.name)}><Plus size={15} /> New page</button></div>
                   <div className="notes-grid">{pages.map((note) => <article className="note-card" key={note.id}>
                     <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
-                    <button className="note-page-open" onClick={() => editNotePage(note)}>
+                    <button className="note-page-open" disabled={!note.can_edit}
+                      title={note.can_edit ? "Edit note page" : "Only the note author can edit this page"}
+                      onClick={() => editNotePage(note)}>
                       <h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p>
                     </button>
-                    <div className="note-card-footer"><span className="note-topic">{note.domain || "General"}</span><button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button></div>
+                    <div className="note-card-footer"><span className="note-topic">{note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
                   </article>)}</div>
                 </section>;
               })}
@@ -806,8 +808,10 @@ export default function App() {
                 <div className="topic-group-heading"><div><h3>General pages</h3></div></div>
                 <div className="notes-grid">{filteredNotes.filter((note) => !topics.some((topic) => topic.name === note.topic)).map((note) => <article className="note-card" key={note.id}>
                   <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
-                  <button className="note-page-open" onClick={() => editNotePage(note)}><h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p></button>
-                  <div className="note-card-footer"><span className="note-topic">{note.topic || "General"} · {note.domain || "General"}</span><button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button></div>
+                  <button className="note-page-open" disabled={!note.can_edit}
+                    title={note.can_edit ? "Edit note page" : "Only the note author can edit this page"}
+                    onClick={() => editNotePage(note)}><h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p></button>
+                  <div className="note-card-footer"><span className="note-topic">{note.topic || "General"} · {note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
                 </article>)}</div>
               </section>}
             </div>}
