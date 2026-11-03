@@ -13,7 +13,7 @@
     "alarms"
   ],
   "host_permissions": [
-    "https://studytrack.example.com/api/*",
+    "https://studytrack-api-6nql.onrender.com/*",
     "http://127.0.0.1:8000/*",
     "http://localhost:8000/*"
   ],

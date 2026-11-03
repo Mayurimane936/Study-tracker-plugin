@@ -46,6 +46,22 @@ _retention_task = None
 # CONFIGURATION
 # ============================================================
 
+def normalize_database_url(database_url: str) -> str:
+    if database_url.startswith("postgres://"):
+        return database_url.replace(
+            "postgres://",
+            "postgresql+psycopg://",
+            1,
+        )
+    if database_url.startswith("postgresql://"):
+        return database_url.replace(
+            "postgresql://",
+            "postgresql+psycopg://",
+            1,
+        )
+    return database_url
+
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -55,12 +71,7 @@ if not DATABASE_URL:
         "DATABASE_URL is missing. Add it to backend/.env"
     )
 
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace(
-        "postgres://",
-        "postgresql://",
-        1,
-    )
+DATABASE_URL = normalize_database_url(DATABASE_URL)
 
 TOKEN_SECRET = os.getenv("STUDYTRACK_SECRET_KEY")
 
