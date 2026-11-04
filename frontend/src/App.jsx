@@ -93,6 +93,58 @@ function StatCard({ title, value, subtitle, icon: Icon, tone }) {
   );
 }
 
+function StreakCalendar({ days = [], streak = 0 }) {
+  if (!days.length) return null;
+
+  const firstDate = new Date(`${days[0].date}T12:00:00`);
+  const leadingBlanks = (firstDate.getDay() + 6) % 7;
+  const cells = [
+    ...Array.from({ length: leadingBlanks }, (_, index) => ({
+      key: `blank-${index}`,
+      blank: true,
+    })),
+    ...days.map((day) => ({ ...day, key: day.date })),
+  ];
+  const maxSeconds = Math.max(1, ...days.map((day) => day.seconds || 0));
+
+  function level(seconds) {
+    if (!seconds) return 0;
+    const ratio = seconds / maxSeconds;
+    if (ratio < 0.25) return 1;
+    if (ratio < 0.5) return 2;
+    if (ratio < 0.75) return 3;
+    return 4;
+  }
+
+  return (
+    <section className="streak-calendar" aria-label="Daily study streak calendar">
+      <div className="streak-calendar-heading">
+        <div>
+          <strong>{streak} day{streak === 1 ? "" : "s"} streak</strong>
+          <span>Study activity over the last {days.length} days</span>
+        </div>
+        <div className="streak-legend" aria-label="Less to more study time">
+          <span>Less</span>
+          {[0, 1, 2, 3, 4].map((value) => <i key={value} className={`streak-cell level-${value}`} />)}
+          <span>More</span>
+        </div>
+      </div>
+      <div className="streak-calendar-scroll">
+        <div className="streak-calendar-grid">
+          {cells.map((day) => day.blank
+            ? <span className="streak-cell streak-cell-blank" key={day.key} aria-hidden="true" />
+            : <span
+                className={`streak-cell level-${level(day.seconds)}`}
+                key={day.key}
+                title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
+                aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
+              />)}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function EmptyState({ icon: Icon, title, description }) {
   return (
     <div className="empty-state">
@@ -722,6 +774,10 @@ export default function App() {
         </header>
 
         <div className="page-content">
+          <StreakCalendar
+            days={summary?.daily_study || []}
+            streak={summary?.current_streak || 0}
+          />
           <section className="welcome-row">
             <div><div className="eyebrow"><span className="eyebrow-dot" /> YOUR PERSONAL LEARNING DASHBOARD</div><h1>{pageTitle}</h1><p className="page-subtitle">{pageSubtitle}</p></div>
             <div className="date-chip"><Clock3 size={16} />{todayLabel}</div>

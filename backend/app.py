@@ -1746,6 +1746,7 @@ def dashboard(
 
     today = datetime.now(timezone.utc).date()
     week_start = today - timedelta(days=6)
+    history_start = today - timedelta(days=SESSION_RETENTION_DAYS - 1)
 
     today_seconds = sum(
         session.duration_seconds
@@ -1768,6 +1769,31 @@ def dashboard(
             "date": day.isoformat(),
             "seconds": seconds,
         })
+
+    daily_totals = {}
+    for session in sessions:
+        session_day = aware_datetime(session.started_at).date()
+        if history_start <= session_day <= today:
+            daily_totals[session_day] = (
+                daily_totals.get(session_day, 0) + session.duration_seconds
+            )
+
+    daily_study = [
+        {
+            "date": (history_start + timedelta(days=offset)).isoformat(),
+            "seconds": daily_totals.get(history_start + timedelta(days=offset), 0),
+        }
+        for offset in range(SESSION_RETENTION_DAYS)
+    ]
+
+    streak_cursor = today if daily_totals.get(today, 0) > 0 else today - timedelta(days=1)
+    current_streak = 0
+    while (
+        streak_cursor >= history_start
+        and daily_totals.get(streak_cursor, 0) > 0
+    ):
+        current_streak += 1
+        streak_cursor -= timedelta(days=1)
 
     total_seconds = sum(
         session.duration_seconds
@@ -1797,6 +1823,9 @@ def dashboard(
         "notes_count": note_count,
         "topics_count": topic_count,
         "weekly_study": weekly,
+        "daily_study": daily_study,
+        "current_streak": current_streak,
+        "history_days": SESSION_RETENTION_DAYS,
     }
 
 
