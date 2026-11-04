@@ -326,6 +326,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
   const [showNoteForm, setShowNoteForm] = useState(false);
+  const [noteReadOnly, setNoteReadOnly] = useState(false);
   const [showTopicForm, setShowTopicForm] = useState(false);
   const [groupDialog, setGroupDialog] = useState("");
   const [groupName, setGroupName] = useState("");
@@ -589,10 +590,11 @@ export default function App() {
 
   function startNotePage(topic = "", domain = "") {
     setNoteForm({ id: null, title: "", content: "", topic, domain });
+    setNoteReadOnly(false);
     setShowNoteForm(true);
   }
 
-  function editNotePage(note) {
+  function openNotePage(note) {
     setNoteForm({
       id: note.id,
       title: note.title,
@@ -600,6 +602,7 @@ export default function App() {
       topic: note.topic || "General",
       domain: note.domain || "General",
     });
+    setNoteReadOnly(!note.can_edit);
     setShowNoteForm(true);
   }
 
@@ -795,9 +798,9 @@ export default function App() {
                   <div className="topic-group-heading"><div><h3>{topic.name}</h3><span>{pages.length} pages</span></div><button className="text-button" onClick={() => startNotePage(topic.name)}><Plus size={15} /> New page</button></div>
                   <div className="notes-grid">{pages.map((note) => <article className="note-card" key={note.id}>
                     <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
-                    <button className="note-page-open" disabled={!note.can_edit}
-                      title={note.can_edit ? "Edit note page" : "Only the note author can edit this page"}
-                      onClick={() => editNotePage(note)}>
+                    <button className="note-page-open"
+                      title={note.can_edit ? "Open note page" : "View shared note page"}
+                      onClick={() => openNotePage(note)}>
                       <h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p>
                     </button>
                     <div className="note-card-footer"><span className="note-topic">{note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
@@ -808,9 +811,9 @@ export default function App() {
                 <div className="topic-group-heading"><div><h3>General pages</h3></div></div>
                 <div className="notes-grid">{filteredNotes.filter((note) => !topics.some((topic) => topic.name === note.topic)).map((note) => <article className="note-card" key={note.id}>
                   <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
-                  <button className="note-page-open" disabled={!note.can_edit}
-                    title={note.can_edit ? "Edit note page" : "Only the note author can edit this page"}
-                    onClick={() => editNotePage(note)}><h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p></button>
+                  <button className="note-page-open"
+                    title={note.can_edit ? "Open note page" : "View shared note page"}
+                    onClick={() => openNotePage(note)}><h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p></button>
                   <div className="note-card-footer"><span className="note-topic">{note.topic || "General"} · {note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
                 </article>)}</div>
               </section>}
@@ -899,13 +902,13 @@ export default function App() {
 
       {showNoteForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowNoteForm(false); }}>
         <section className="modal" role="dialog" aria-modal="true">
-          <div className="modal-header"><div><span className="modal-kicker">TOPIC NOTEBOOK</span><h2>{noteForm.id ? "Edit note page" : "Create a note page"}</h2><p>Save a separate page inside a topic and domain.</p></div><button className="icon-button" onClick={() => setShowNoteForm(false)} aria-label="Close"><X size={18} /></button></div>
+          <div className="modal-header"><div><span className="modal-kicker">TOPIC NOTEBOOK</span><h2>{noteReadOnly ? "View note page" : noteForm.id ? "Edit note page" : "Create a note page"}</h2><p>{noteReadOnly ? "Shared with everyone in this group." : "Save a separate page inside a topic and domain."}</p></div><button className="icon-button" onClick={() => setShowNoteForm(false)} aria-label="Close"><X size={18} /></button></div>
           <form onSubmit={submitNote} className="modal-form">
-            <label htmlFor="note-title">Page title</label><input id="note-title" autoFocus required maxLength={200} placeholder="e.g. Binary search — key idea" value={noteForm.title} onChange={(e) => setNoteForm({ ...noteForm, title: e.target.value })} />
-            <label htmlFor="note-topic">Topic</label><select id="note-topic" value={noteForm.topic} onChange={(e) => setNoteForm({ ...noteForm, topic: e.target.value, domain: "" })}><option value="">General</option>{topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}</select>
-            <label htmlFor="note-domain">Domain</label><select id="note-domain" value={noteForm.domain} onChange={(e) => setNoteForm({ ...noteForm, domain: e.target.value })}><option value="">General</option>{selectedTopicDomains.map((domain) => <option key={domain.id} value={domain.name}>{domain.name}</option>)}</select>
-            <label htmlFor="note-content">Page content</label><textarea id="note-content" rows={8} placeholder="Write down the important points..." value={noteForm.content} onChange={(e) => setNoteForm({ ...noteForm, content: e.target.value })} />
-            <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowNoteForm(false)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save page</button></div>
+            <label htmlFor="note-title">Page title</label><input id="note-title" autoFocus={!noteReadOnly} readOnly={noteReadOnly} required maxLength={200} placeholder="e.g. Binary search — key idea" value={noteForm.title} onChange={(e) => setNoteForm({ ...noteForm, title: e.target.value })} />
+            <label htmlFor="note-topic">Topic</label><select id="note-topic" disabled={noteReadOnly} value={noteForm.topic} onChange={(e) => setNoteForm({ ...noteForm, topic: e.target.value, domain: "" })}><option value="">General</option>{topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}</select>
+            <label htmlFor="note-domain">Domain</label><select id="note-domain" disabled={noteReadOnly} value={noteForm.domain} onChange={(e) => setNoteForm({ ...noteForm, domain: e.target.value })}><option value="">General</option>{selectedTopicDomains.map((domain) => <option key={domain.id} value={domain.name}>{domain.name}</option>)}</select>
+            <label htmlFor="note-content">Page content</label><textarea id="note-content" readOnly={noteReadOnly} rows={8} placeholder="Write down the important points..." value={noteForm.content} onChange={(e) => setNoteForm({ ...noteForm, content: e.target.value })} />
+            <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowNoteForm(false)}>{noteReadOnly ? "Close" : "Cancel"}</button>{!noteReadOnly && <button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save page</button>}</div>
           </form>
         </section>
       </div>}
