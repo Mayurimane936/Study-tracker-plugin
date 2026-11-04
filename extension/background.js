@@ -142,15 +142,17 @@ async function syncLocalNotesToBackend() {
     if (!note?.id || syncedIds.has(note.id)) continue;
 
     try {
-      const response = await authenticatedFetch("/notes", {
+      const response = await authenticatedFetch("/notes/append", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: note.title || "Untitled note",
+          source_note_id: note.id,
+          title: note.pageTitle || note.title || "Saved selection",
           content: note.text || note.content || "",
           topic: note.topic || note.subject || "General",
           domain: note.domain || "General",
-          group_id: note.groupId || await selectedGroupId()
+          source_url: note.url || null,
+          group_id: note.groupId ?? await selectedGroupId()
         })
       });
       if (!response.ok) {
@@ -747,11 +749,32 @@ async function syncActiveTab() {
 // Notes and topics
 // --------------------------------------------------
 
-async function getNoteTopics() {
+async function getNotebookOptions() {
   const { studyTopics = [], studyNotes = [] } =
     await chrome.storage.local.get(["studyTopics", "studyNotes"]);
 
-  const topics = [
+  const topicMap = new Map();
+  try {
+    const groupId = await selectedGroupId();
+    const response = await authenticatedFetch(
+      `/topics${groupId ? `?group_id=${groupId}` : ""}`
+    );
+    if (response.ok) {
+      const backendTopics = await response.json();
+      for (const topic of backendTopics) {
+        topicMap.set(topic.name, [
+          "General",
+          ...(topic.domains || []).map(domain => domain.name)
+        ]);
+      }
+    }
+  } catch (error) {
+    if (!error.message.includes("Connect your StudyTrack account")) {
+      console.warn("StudyTrack: Could not refresh topics from backend.", error);
+    }
+  }
+
+  const localTopics = [
     ...DEFAULT_TOPICS,
     ...studyTopics,
     ...(Array.isArray(studyNotes)
@@ -759,12 +782,57 @@ async function getNoteTopics() {
       : [])
   ];
 
-  return [...new Set(
-    topics
-      .filter(topic => typeof topic === "string")
-      .map(topic => topic.trim())
-      .filter(Boolean)
-  )];
+  for (const topic of localTopics) {
+    if (typeof topic === "string" && topic.trim() && !topicMap.has(topic.trim())) {
+      topicMap.set(topic.trim(), ["General"]);
+    }
+  }
+
+  return [...topicMap.entries()]
+    .map(([name, domains]) => ({ name, domains: [...new Set(domains)] }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function createNoteDomain(topicName, domainName) {
+  const topicLabel = String(topicName || "").trim();
+  const name = String(domainName || "").trim();
+  if (!topicLabel) throw new Error("Select a topic before adding a domain.");
+  if (!name) throw new Error("Enter a domain name.");
+  if (name.length > 100) throw new Error("Domain names must be 100 characters or fewer.");
+
+  const groupId = await selectedGroupId();
+  const query = groupId ? `?group_id=${groupId}` : "";
+  const topicsResponse = await authenticatedFetch(`/topics${query}`);
+  if (!topicsResponse.ok) throw new Error("Could not load backend topics.");
+  const topics = await topicsResponse.json();
+  const topic = topics.find(
+    item => item.name.toLowerCase() === topicLabel.toLowerCase()
+  );
+  if (!topic) throw new Error("Topic not found in the selected workspace.");
+
+  const existing = (topic.domains || []).find(
+    domain => domain.name.toLowerCase() === name.toLowerCase()
+  );
+  if (existing) return existing.name;
+
+  const response = await authenticatedFetch(`/topics/${topic.id}/domains`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok && response.status !== 409) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Could not create domain (${response.status}). ${detail}`);
+  }
+
+  if (response.status === 409) {
+    return (await response.json()).name || name;
+  }
+  return (await response.json()).name;
+}
+
+async function getNoteTopics() {
+  return (await getNotebookOptions()).map(topic => topic.name);
 }
 
 async function createNoteTopic(topicName) {
@@ -774,8 +842,8 @@ async function createNoteTopic(topicName) {
     throw new Error("Enter a topic name.");
   }
 
-  if (name.length > 50) {
-    throw new Error("Topic names must be 50 characters or fewer.");
+  if (name.length > 80) {
+    throw new Error("Topic names must be 80 characters or fewer.");
   }
 
   const topics = await getNoteTopics();
@@ -783,6 +851,35 @@ async function createNoteTopic(topicName) {
   const existing = topics.find(
     topic => topic.toLowerCase() === name.toLowerCase()
   );
+
+  const { studyTrackAuth } =
+    await chrome.storage.local.get("studyTrackAuth");
+  if (studyTrackAuth?.token) {
+    const groupId = await selectedGroupId();
+    const query = groupId ? `?group_id=${groupId}` : "";
+    const topicsResponse = await authenticatedFetch(`/topics${query}`);
+    if (!topicsResponse.ok) {
+      throw new Error("Could not load backend topics.");
+    }
+    const backendTopics = await topicsResponse.json();
+    const backendMatch = backendTopics.find(
+      topic => topic.name.toLowerCase() === name.toLowerCase()
+    );
+    if (backendMatch) return backendMatch.name;
+
+    const response = await authenticatedFetch("/topics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        group_id: groupId
+      })
+    });
+    if (!response.ok && response.status !== 409) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`Could not create topic (${response.status}). ${detail}`);
+    }
+  }
 
   if (existing) return existing;
 
@@ -796,7 +893,7 @@ async function createNoteTopic(topicName) {
 }
 
 
-async function saveStudyNote({ text, title, url, pageTitle, topic }) {
+async function saveStudyNote({ text, title, url, pageTitle, topic, domain }) {
   const noteText = String(text || "").trim();
 
   if (!noteText) {
@@ -808,6 +905,7 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
   }
 
   const chosenTopic = await createNoteTopic(topic || "DSA");
+  const chosenDomain = String(domain || "General").trim() || "General";
   const { studyNotes = [] } =
     await chrome.storage.local.get("studyNotes");
 
@@ -821,6 +919,8 @@ async function saveStudyNote({ text, title, url, pageTitle, topic }) {
     text: noteText,
     subject: chosenTopic,
     topic: chosenTopic,
+    domain: chosenDomain,
+    groupId: await selectedGroupId(),
     url: String(url || "").slice(0, 2000),
     pageTitle: safePageTitle,
     createdAt: new Date().toISOString()
@@ -918,6 +1018,12 @@ async function handleMessage(message, sender) {
         topics: await getNoteTopics()
       };
 
+    case "GET_NOTEBOOK_OPTIONS":
+      return {
+        success: true,
+        topics: await getNotebookOptions()
+      };
+
     case "CREATE_NOTE_TOPIC": {
       const topic = await createNoteTopic(message.topic);
 
@@ -928,13 +1034,23 @@ async function handleMessage(message, sender) {
       };
     }
 
+    case "CREATE_NOTE_DOMAIN": {
+      const domain = await createNoteDomain(message.topic, message.domain);
+      return {
+        success: true,
+        domain,
+        topics: await getNotebookOptions()
+      };
+    }
+
     case "SAVE_NOTE_FROM_PAGE": {
       const note = await saveStudyNote({
         text: message.text,
         title: message.title,
         url: message.url,
         pageTitle: message.pageTitle,
-        topic: message.topic
+        topic: message.topic,
+        domain: message.domain
       });
 
       return {

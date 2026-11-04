@@ -26,6 +26,8 @@ const captureBtn = document.getElementById("captureBtn");
 const noteTitle = document.getElementById("noteTitle");
 const noteText = document.getElementById("noteText");
 const noteSubject = document.getElementById("noteSubject");
+const noteDomain = document.getElementById("noteDomain");
+const newNoteDomain = document.getElementById("newNoteDomain");
 const saveNoteBtn = document.getElementById("saveNoteBtn");
 const noteStatus = document.getElementById("noteStatus");
 const notesList = document.getElementById("notesList");
@@ -41,6 +43,8 @@ let timerState = {
 let activeWebsiteSession = null;
 let trackedSites = [];
 let refreshInProgress = false;
+let notebookTopics = [];
+const CREATE_DOMAIN_OPTION = "__studytrack_create_domain__";
 
 // -------------------- Utilities --------------------
 
@@ -150,15 +154,11 @@ syncGroupSelect.addEventListener("change", async () => {
 
 async function loadTopics() {
   const response = await sendMessage({
-    action: "GET_NOTE_TOPICS"
+    action: "GET_NOTEBOOK_OPTIONS"
   });
 
-  const topics = response.topics || [
-    "DSA",
-    "C++",
-    "System Design",
-    "Other"
-  ];
+  notebookTopics = Array.isArray(response.topics) ? response.topics : [];
+  const topics = notebookTopics.map(topic => topic.name);
 
   populateSelect(subjectSelect, topics, timerState.subject || "DSA");
   populateSelect(
@@ -171,6 +171,62 @@ async function loadTopics() {
     topics,
     noteSubject.value || "DSA"
   );
+  populateNoteDomains();
+}
+
+function populateNoteDomains(preferredDomain = noteDomain.value) {
+  const selectedTopic = notebookTopics.find(
+    topic => topic.name === noteSubject.value
+  );
+  const domains = [...new Set(["General", ...(selectedTopic?.domains || [])])];
+  const creatingDomain = preferredDomain === CREATE_DOMAIN_OPTION;
+  const domainValue = creatingDomain
+    ? newNoteDomain.value
+    : preferredDomain;
+  domains.push(CREATE_DOMAIN_OPTION);
+  const labels = new Map(domains.map(domain => [
+    domain,
+    domain === CREATE_DOMAIN_OPTION ? "+ Create a new domain..." : domain
+  ]));
+  populateSelect(
+    noteDomain,
+    domains,
+    domains.includes(domainValue) ? domainValue : "General"
+  );
+  [...noteDomain.options].forEach(option => {
+    option.textContent = labels.get(option.value) || option.value;
+  });
+  newNoteDomain.hidden = noteDomain.value !== CREATE_DOMAIN_OPTION;
+}
+
+noteSubject.addEventListener("change", () => {
+  populateNoteDomains("General");
+});
+
+noteDomain.addEventListener("change", () => {
+  const creating = noteDomain.value === CREATE_DOMAIN_OPTION;
+  newNoteDomain.hidden = !creating;
+  if (creating) newNoteDomain.focus();
+});
+
+async function resolveNoteDomain(topic) {
+  if (noteDomain.value !== CREATE_DOMAIN_OPTION) {
+    return noteDomain.value || "General";
+  }
+  const name = newNoteDomain.value.trim();
+  if (!name) {
+    newNoteDomain.focus();
+    throw new Error("Enter a domain name.");
+  }
+  const result = await sendMessage({
+    action: "CREATE_NOTE_DOMAIN",
+    topic,
+    domain: name
+  });
+  await loadTopics();
+  noteSubject.value = topic;
+  populateNoteDomains(result.domain);
+  return result.domain;
 }
 
 function populateSelect(select, topics, selectedValue) {
@@ -580,6 +636,8 @@ saveNoteBtn.addEventListener("click", async () => {
   saveNoteBtn.disabled = true;
 
   try {
+    const topic = noteSubject.value || subjectSelect.value;
+    const domain = await resolveNoteDomain(topic);
     const [tab] = await chrome.tabs.query({
       active: true,
       currentWindow: true
@@ -591,15 +649,16 @@ saveNoteBtn.addEventListener("click", async () => {
       title: noteTitle.value.trim() || tab?.title || "Untitled note",
       pageTitle: tab?.title || "",
       url: tab?.url || "",
-      topic: noteSubject.value || subjectSelect.value
+      topic,
+      domain
     });
 
     noteText.value = "";
     noteTitle.value = "";
 
     setStatus(noteStatus, saved.note?.synced
-      ? "Note saved and synced to StudyTrack."
-      : "Note saved locally. Connect the extension account to sync it.");
+      ? "Added to the topic notebook."
+      : "Saved locally. Sync will retry when connected.");
 
     await loadTopics();
     await renderNotes();

@@ -323,6 +323,33 @@ class NotePage(Base):
     )
 
 
+class NoteAppendEvent(Base):
+    __tablename__ = "st_note_append_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("st_users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_note_id: Mapped[str] = mapped_column(String(120))
+    note_page_id: Mapped[int] = mapped_column(
+        ForeignKey("st_note_pages.id", ondelete="CASCADE"),
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "source_note_id",
+            name="uq_st_note_append_source",
+        ),
+    )
+
+
 class CompetitionWinner(Base):
     __tablename__ = "st_competition_winners"
 
@@ -856,6 +883,16 @@ class NoteIn(BaseModel):
     content: str = ""
     topic: str = "General"
     domain: str = "General"
+    group_id: Optional[int] = None
+
+
+class NoteAppendIn(BaseModel):
+    source_note_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(default="Saved selection", max_length=200)
+    content: str = Field(min_length=1, max_length=50000)
+    topic: str = Field(default="General", min_length=1, max_length=80)
+    domain: str = Field(default="General", min_length=1, max_length=100)
+    source_url: Optional[str] = Field(default=None, max_length=2000)
     group_id: Optional[int] = None
 
 
@@ -1527,6 +1564,78 @@ def create_note(
     db.refresh(note)
 
     return note_json(note)
+
+
+@app.post("/notes/append")
+def append_topic_note(
+    data: NoteAppendIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(data.group_id, user, db)
+
+    existing_event = db.scalar(
+        select(NoteAppendEvent).where(
+            NoteAppendEvent.user_id == user.id,
+            NoteAppendEvent.source_note_id == data.source_note_id,
+        )
+    )
+    if existing_event:
+        existing_page = db.get(NotePage, existing_event.note_page_id)
+        if existing_page:
+            return {**note_json(existing_page), "appended": False}
+
+    topic = data.topic.strip()
+    domain = data.domain.strip() or "General"
+    notebook_title = (
+        f"{topic} Notes"
+        if domain == "General"
+        else f"{topic} - {domain} Notes"
+    )
+    notebook = db.scalar(
+        select(NotePage)
+        .where(
+            NotePage.group_id == data.group_id,
+            NotePage.topic == topic,
+            NotePage.domain == domain,
+            NotePage.title == notebook_title,
+        )
+        .order_by(NotePage.id)
+    )
+
+    if notebook is None:
+        notebook = NotePage(
+            user_id=user.id,
+            group_id=data.group_id,
+            topic=topic,
+            domain=domain,
+            title=notebook_title,
+            content="",
+        )
+        db.add(notebook)
+        db.flush()
+
+    captured_at = datetime.now(timezone.utc).isoformat(timespec="minutes")
+    source = f"\nSource: {data.source_url}" if data.source_url else ""
+    entry = (
+        f"[{captured_at}] {data.title.strip() or 'Saved selection'}\n"
+        f"{data.content.strip()}{source}"
+    )
+    notebook.content = (
+        f"{notebook.content.rstrip()}\n\n---\n\n{entry}"
+        if notebook.content.strip()
+        else entry
+    )
+    notebook.updated_at = datetime.now(timezone.utc)
+    db.add(NoteAppendEvent(
+        user_id=user.id,
+        source_note_id=data.source_note_id,
+        note_page_id=notebook.id,
+    ))
+    db.commit()
+    db.refresh(notebook)
+
+    return {**note_json(notebook), "appended": True}
 
 
 @app.get("/notes")

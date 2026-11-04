@@ -3,6 +3,7 @@
   if (document.getElementById("studytrack-selection-host")) return;
 
   const CREATE_NEW_TOPIC = "__studytrack_create_new_topic__";
+  const CREATE_NEW_DOMAIN = "__studytrack_create_new_domain__";
 
   const host = document.createElement("div");
   host.id = "studytrack-selection-host";
@@ -177,24 +178,42 @@
     <section class="st-panel" aria-label="Save study note">
       <h2 class="st-heading">Save study note</h2>
       <p class="st-description">
-        Choose where this selection belongs.
+        Choose a topic and domain. Captures append to that notebook section.
       </p>
 
       <div class="st-preview"></div>
 
       <label class="st-label" for="st-topic">
-        Study topic
+        Topic notebook
       </label>
 
       <select class="st-select" id="st-topic" disabled>
         <option value="">Loading topics...</option>
       </select>
 
+      <label class="st-label" for="st-domain">
+        Domain
+      </label>
+
+      <select class="st-select" id="st-domain" disabled>
+        <option value="General">General</option>
+      </select>
+
+      <input
+        class="st-input st-hidden"
+        id="st-new-domain"
+        type="text"
+        maxlength="100"
+        placeholder="Enter a new domain name"
+        autocomplete="off"
+        aria-label="New study domain"
+      />
+
       <input
         class="st-input st-hidden"
         id="st-new-topic"
         type="text"
-        maxlength="50"
+        maxlength="80"
         placeholder="Enter a new topic name"
         autocomplete="off"
         aria-label="New study topic"
@@ -202,7 +221,7 @@
 
       <div class="st-actions">
         <button class="st-button st-primary" id="st-save" type="button">
-          Save note
+          Add to topic notes
         </button>
 
         <button class="st-button st-secondary" id="st-cancel" type="button">
@@ -220,6 +239,8 @@
   const panel = shadow.querySelector(".st-panel");
   const preview = shadow.querySelector(".st-preview");
   const topicSelect = shadow.querySelector("#st-topic");
+  const domainSelect = shadow.querySelector("#st-domain");
+  const newDomainInput = shadow.querySelector("#st-new-domain");
   const newTopicInput = shadow.querySelector("#st-new-topic");
   const saveButton = shadow.querySelector("#st-save");
   const cancelButton = shadow.querySelector("#st-cancel");
@@ -227,8 +248,9 @@
 
   let selectedText = "";
   let selectionPosition = { left: 20, top: 20 };
-  let topics = ["DSA", "C++", "System Design", "Other"];
+  let topics = [];
   let selectedTopic = "DSA";
+  let selectedDomain = "General";
   let pageTitle = document.title;
   let pageUrl = window.location.href;
   let busy = false;
@@ -244,7 +266,9 @@
     saveButton.disabled = value || !topicsLoaded;
     cancelButton.disabled = value;
     topicSelect.disabled = value || !topicsLoaded;
+    domainSelect.disabled = value || !topicsLoaded;
     newTopicInput.disabled = value || !topicsLoaded;
+    newDomainInput.disabled = value || !topicsLoaded;
   }
 
   async function sendMessage(message) {
@@ -304,19 +328,44 @@
     }
   }
 
-  function renderTopics(preferredTopic) {
+  function renderDomains(topicName, preferredDomain = selectedDomain) {
+    const topic = topics.find(item => item.name === topicName);
+    const domains = [...new Set([
+      "General",
+      ...(topic?.domains || [])
+    ].filter(domain => typeof domain === "string" && domain.trim()))];
+
+    domainSelect.replaceChildren();
+    for (const domain of domains) {
+      const option = document.createElement("option");
+      option.value = domain;
+      option.textContent = domain;
+      domainSelect.appendChild(option);
+    }
+
+    const createOption = document.createElement("option");
+    createOption.value = CREATE_NEW_DOMAIN;
+    createOption.textContent = "+ Create a new domain...";
+    domainSelect.appendChild(createOption);
+
+    domainSelect.value = domains.includes(preferredDomain)
+      ? preferredDomain
+      : "General";
+    selectedDomain = domainSelect.value;
+    newDomainInput.classList.add("st-hidden");
+    newDomainInput.value = "";
+  }
+
+  function renderTopics(preferredTopic, preferredDomain) {
     topicSelect.replaceChildren();
 
-    const normalizedTopics = [
-      ...new Set(
-        topics
-          .filter(topic => typeof topic === "string")
-          .map(topic => topic.trim())
-          .filter(Boolean)
-      )
-    ];
-
-    topics = normalizedTopics;
+    topics = topics
+      .filter(topic => topic && typeof topic.name === "string")
+      .map(topic => ({
+        name: topic.name.trim(),
+        domains: Array.isArray(topic.domains) ? topic.domains : []
+      }))
+      .filter(topic => topic.name);
 
     if (topics.length === 0) {
       const emptyOption = document.createElement("option");
@@ -327,8 +376,8 @@
 
     for (const topic of topics) {
       const option = document.createElement("option");
-      option.value = topic;
-      option.textContent = topic;
+      option.value = topic.name;
+      option.textContent = topic.name;
       topicSelect.appendChild(option);
     }
 
@@ -339,25 +388,24 @@
 
     const match = topics.find(
       topic =>
-        topic.toLowerCase() ===
+        topic.name.toLowerCase() ===
         String(preferredTopic || "").trim().toLowerCase()
     );
 
-    topicSelect.value = match || topics[0] || CREATE_NEW_TOPIC;
+    topicSelect.value = match?.name || topics[0]?.name || CREATE_NEW_TOPIC;
 
     updateTopicInput();
+    renderDomains(topicSelect.value === CREATE_NEW_TOPIC ? "" : topicSelect.value, preferredDomain);
   }
 
-  async function loadTopics(preferredTopic = selectedTopic) {
+  async function loadTopics(preferredTopic = selectedTopic, preferredDomain = selectedDomain) {
     const response = await sendMessage({
-      action: "GET_NOTE_TOPICS"
+      action: "GET_NOTEBOOK_OPTIONS"
     });
 
-    topics = Array.isArray(response.topics)
-      ? response.topics
-      : ["DSA", "C++", "System Design", "Other"];
+    topics = Array.isArray(response.topics) ? response.topics : [];
 
-    renderTopics(preferredTopic);
+    renderTopics(preferredTopic, preferredDomain);
 
     topicsLoaded = true;
     setBusy(busy);
@@ -398,10 +446,33 @@
 
     selectedTopic = createdTopic;
     topicSelect.value = createdTopic;
+    renderDomains(createdTopic, "General");
     newTopicInput.value = "";
     updateTopicInput();
 
     return createdTopic;
+  }
+
+  async function resolveSelectedDomain(topic) {
+    if (domainSelect.value !== CREATE_NEW_DOMAIN) {
+      selectedDomain = domainSelect.value || "General";
+      return selectedDomain;
+    }
+
+    const name = newDomainInput.value.trim();
+    if (!name) {
+      newDomainInput.focus();
+      throw new Error("Enter a name for your new domain.");
+    }
+
+    const response = await sendMessage({
+      action: "CREATE_NOTE_DOMAIN",
+      topic,
+      domain: name
+    });
+    selectedDomain = response.domain || name;
+    await loadTopics(topic, selectedDomain);
+    return selectedDomain;
   }
 
   function showBubble() {
@@ -490,6 +561,7 @@
       newTopicInput.focus();
     } else {
       selectedTopic = topicSelect.value;
+      renderDomains(selectedTopic);
       setStatus(`Selected topic: ${selectedTopic}`);
     }
 
@@ -500,7 +572,26 @@
     );
   });
 
+  domainSelect.addEventListener("change", () => {
+    const creating = domainSelect.value === CREATE_NEW_DOMAIN;
+    newDomainInput.classList.toggle("st-hidden", !creating);
+    if (creating) {
+      setStatus("Enter a new domain name.");
+      newDomainInput.focus();
+    } else {
+      selectedDomain = domainSelect.value || "General";
+      setStatus(`Selected ${selectedTopic} · ${selectedDomain}`);
+    }
+  });
+
   newTopicInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveButton.click();
+    }
+  });
+
+  newDomainInput.addEventListener("keydown", event => {
     if (event.key === "Enter") {
       event.preventDefault();
       saveButton.click();
@@ -544,6 +635,7 @@
 
     try {
       const topic = await resolveSelectedTopic();
+      const domain = await resolveSelectedDomain(topic);
 
       const response = await sendMessage({
         action: "SAVE_NOTE_FROM_PAGE",
@@ -551,14 +643,16 @@
         title: pageTitle || "Saved selection",
         pageTitle,
         url: pageUrl,
-        topic
+        topic,
+        domain
       });
 
       selectedTopic = response.note?.topic || topic;
+      selectedDomain = response.note?.domain || domain;
 
       setStatus(response.note?.synced
-        ? `Saved and synced to "${selectedTopic}".`
-        : `Saved locally to "${selectedTopic}". Connect the extension account to sync.`);
+        ? `Added to "${selectedTopic} · ${selectedDomain}" notes.`
+        : `Saved locally to "${selectedTopic} · ${selectedDomain}". Sync will retry when connected.`);
 
       setTimeout(hideUI, 1100);
     } catch (error) {
