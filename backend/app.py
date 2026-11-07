@@ -8,15 +8,17 @@ import secrets
 import calendar
 import asyncio
 import logging
-from contextlib import suppress, asynccontextmanager
 
+from contextlib import suppress, asynccontextmanager
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
+
 from sqlalchemy import (
     create_engine,
     String,
@@ -38,13 +40,30 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 
-logger = logging.getLogger("studytrack.retention")
-SESSION_RETENTION_DAYS = 90
-_retention_task = None
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
+
+logger = logging.getLogger("studytrack.retention")
+
+SESSION_RETENTION_DAYS = 90
+RETENTION_CHECK_INTERVAL_SECONDS = 60
+
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+
+_retention_task = None
+
+
+def india_now() -> datetime:
+    """Return the current timezone-aware Indian datetime."""
+    return datetime.now(INDIA_TZ)
+
+
+def india_today() -> date:
+    """Return today's date in India."""
+    return india_now().date()
+
 
 def normalize_database_url(database_url: str) -> str:
     if database_url.startswith("postgres://"):
@@ -53,12 +72,14 @@ def normalize_database_url(database_url: str) -> str:
             "postgresql+psycopg://",
             1,
         )
+
     if database_url.startswith("postgresql://"):
         return database_url.replace(
             "postgresql://",
             "postgresql+psycopg://",
             1,
         )
+
     return database_url
 
 
@@ -77,7 +98,7 @@ TOKEN_SECRET = os.getenv("STUDYTRACK_SECRET_KEY")
 
 if not TOKEN_SECRET or len(TOKEN_SECRET) < 32:
     raise RuntimeError(
-        "Set STUDYTRACK_TOKEN_SECRET to a random secret "
+        "Set STUDYTRACK_SECRET_KEY to a random secret "
         "of at least 32 characters in backend/.env"
     )
 
@@ -108,20 +129,24 @@ class User(Base):
         Integer,
         primary_key=True,
     )
+
     name: Mapped[str] = mapped_column(
         String(80),
         nullable=False,
     )
+
     email: Mapped[str] = mapped_column(
         String(255),
         unique=True,
         index=True,
         nullable=False,
     )
+
     password_hash: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
     )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -135,20 +160,24 @@ class StudyGroup(Base):
         Integer,
         primary_key=True,
     )
+
     name: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
     )
+
     invite_code: Mapped[str] = mapped_column(
         String(16),
         unique=True,
         index=True,
         nullable=False,
     )
+
     created_by: Mapped[int] = mapped_column(
         ForeignKey("st_users.id", ondelete="CASCADE"),
         nullable=False,
     )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -162,14 +191,17 @@ class Membership(Base):
         Integer,
         primary_key=True,
     )
+
     group_id: Mapped[int] = mapped_column(
         ForeignKey("st_groups.id", ondelete="CASCADE"),
         index=True,
     )
+
     user_id: Mapped[int] = mapped_column(
         ForeignKey("st_users.id", ondelete="CASCADE"),
         index=True,
     )
+
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -191,19 +223,23 @@ class Topic(Base):
         Integer,
         primary_key=True,
     )
+
     user_id: Mapped[int] = mapped_column(
         ForeignKey("st_users.id", ondelete="CASCADE"),
         index=True,
     )
+
     group_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("st_groups.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
     )
+
     name: Mapped[str] = mapped_column(
         String(80),
         nullable=False,
     )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -217,14 +253,17 @@ class Domain(Base):
         Integer,
         primary_key=True,
     )
+
     topic_id: Mapped[int] = mapped_column(
         ForeignKey("st_topics.id", ondelete="CASCADE"),
         index=True,
     )
+
     name: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
     )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -238,42 +277,52 @@ class StudySession(Base):
         Integer,
         primary_key=True,
     )
+
     source_session_id: Mapped[Optional[str]] = mapped_column(
         String(120),
         unique=True,
         nullable=True,
     )
+
     user_id: Mapped[int] = mapped_column(
         ForeignKey("st_users.id", ondelete="CASCADE"),
         index=True,
     )
+
     group_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("st_groups.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
+
     topic: Mapped[str] = mapped_column(
         String(80),
         default="General",
     )
+
     domain: Mapped[Optional[str]] = mapped_column(
         String(100),
         nullable=True,
     )
+
     duration_seconds: Mapped[int] = mapped_column(
         Integer,
         default=0,
     )
+
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
     )
+
     ended_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
     )
+
     site_url: Mapped[Optional[str]] = mapped_column(
         String(1000),
         nullable=True,
     )
+
     site_title: Mapped[Optional[str]] = mapped_column(
         String(500),
         nullable=True,
@@ -287,35 +336,43 @@ class NotePage(Base):
         Integer,
         primary_key=True,
     )
+
     user_id: Mapped[int] = mapped_column(
         ForeignKey("st_users.id", ondelete="CASCADE"),
         index=True,
     )
+
     group_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("st_groups.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
     )
+
     topic: Mapped[str] = mapped_column(
         String(80),
         default="General",
     )
+
     domain: Mapped[str] = mapped_column(
         String(100),
         default="General",
     )
+
     title: Mapped[str] = mapped_column(
         String(200),
         nullable=False,
     )
+
     content: Mapped[str] = mapped_column(
         Text,
         default="",
     )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -326,16 +383,25 @@ class NotePage(Base):
 class NoteAppendEvent(Base):
     __tablename__ = "st_note_append_events"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
     user_id: Mapped[int] = mapped_column(
         ForeignKey("st_users.id", ondelete="CASCADE"),
         index=True,
     )
-    source_note_id: Mapped[str] = mapped_column(String(120))
+
+    source_note_id: Mapped[str] = mapped_column(
+        String(120),
+    )
+
     note_page_id: Mapped[int] = mapped_column(
         ForeignKey("st_note_pages.id", ondelete="CASCADE"),
         index=True,
     )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -357,24 +423,33 @@ class CompetitionWinner(Base):
         Integer,
         primary_key=True,
     )
+
     group_id: Mapped[int] = mapped_column(
         ForeignKey("st_groups.id", ondelete="CASCADE"),
         index=True,
     )
+
     period_start: Mapped[date] = mapped_column(
         Date,
         index=True,
     )
+
     period_end: Mapped[date] = mapped_column(Date)
+
     winner_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("st_users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    winner_name: Mapped[str] = mapped_column(String(80))
+
+    winner_name: Mapped[str] = mapped_column(
+        String(80),
+    )
+
     winning_seconds: Mapped[int] = mapped_column(
         Integer,
         default=0,
     )
+
     saved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -396,18 +471,33 @@ class CompetitionRoundWinner(Base):
         Integer,
         primary_key=True,
     )
+
     group_id: Mapped[int] = mapped_column(
         ForeignKey("st_groups.id", ondelete="CASCADE"),
         index=True,
     )
-    period_start: Mapped[date] = mapped_column(Date, index=True)
+
+    period_start: Mapped[date] = mapped_column(
+        Date,
+        index=True,
+    )
+
     period_end: Mapped[date] = mapped_column(Date)
+
     winner_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("st_users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    winner_name: Mapped[str] = mapped_column(String(80))
-    winning_seconds: Mapped[int] = mapped_column(Integer, default=0)
+
+    winner_name: Mapped[str] = mapped_column(
+        String(80),
+    )
+
+    winning_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
     saved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -431,6 +521,7 @@ Base.metadata.create_all(engine)
 
 def get_db():
     db = SessionLocal()
+
     try:
         yield db
     finally:
@@ -572,6 +663,7 @@ def member_of(
     group_id: int,
     user_id: int,
 ) -> bool:
+
     return (
         db.scalar(
             select(Membership.id).where(
@@ -602,22 +694,102 @@ def workspace_group(
             )
 
 
+def aware_datetime(value: datetime) -> datetime:
+    """
+    Make a datetime timezone-aware.
+
+    Naive datetimes are treated as UTC to preserve the
+    existing storage convention.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value
+
+
+def to_india_datetime(value: datetime) -> datetime:
+    return aware_datetime(value).astimezone(INDIA_TZ)
+
+
 def period_for(day: date):
+    """
+    Fixed date rounds:
+
+    1  - 7
+    8  - 14
+    15 - 21
+    22 - last day of month
+    """
     month_end = date(
         day.year,
         day.month,
         calendar.monthrange(day.year, day.month)[1],
     )
-    start_day = ((day.day - 1) // 8) * 8 + 1
-    start = day.replace(day=start_day)
-    end = min(start_day + 7, month_end.day)
-    return start, day.replace(day=end)
+
+    if day.day <= 7:
+        start_day = 1
+        end_day = 7
+
+    elif day.day <= 14:
+        start_day = 8
+        end_day = 14
+
+    elif day.day <= 21:
+        start_day = 15
+        end_day = 21
+
+    else:
+        start_day = 22
+        end_day = month_end.day
+
+    start = date(day.year, day.month, start_day)
+    end = date(
+        day.year,
+        day.month,
+        min(end_day, month_end.day),
+    )
+
+    return start, end
 
 
 def month_for(day: date):
     start = day.replace(day=1)
-    end = day.replace(day=calendar.monthrange(day.year, day.month)[1])
+
+    end = day.replace(
+        day=calendar.monthrange(day.year, day.month)[1]
+    )
+
     return start, end
+
+
+def india_day_bounds_utc(
+    start: date,
+    end: date,
+):
+    """
+    Convert an inclusive IST date range into UTC datetime bounds.
+
+    Example:
+    IST Nov 1 00:00 through Nov 7 23:59:59
+    becomes:
+    UTC Oct 31 18:30 through UTC Nov 7 18:30 (exclusive).
+    """
+    start_ist = datetime.combine(
+        start,
+        datetime.min.time(),
+        tzinfo=INDIA_TZ,
+    )
+
+    end_ist = datetime.combine(
+        end + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=INDIA_TZ,
+    )
+
+    return (
+        start_ist.astimezone(timezone.utc),
+        end_ist.astimezone(timezone.utc),
+    )
 
 
 def group_period_rows(
@@ -628,28 +800,35 @@ def group_period_rows(
 ):
     members = db.execute(
         select(User.id, User.name)
-        .join(Membership, Membership.user_id == User.id)
+        .join(
+            Membership,
+            Membership.user_id == User.id,
+        )
         .where(Membership.group_id == group_id)
     ).all()
-    start_at = datetime.combine(
-        start, datetime.min.time(), tzinfo=timezone.utc
+
+    start_at, end_at = india_day_bounds_utc(
+        start,
+        end,
     )
-    end_at = datetime.combine(
-        end + timedelta(days=1), datetime.min.time(),
-        tzinfo=timezone.utc,
-    )
+
     rows = []
 
     for member_id, name in members:
         seconds = db.scalar(
-            select(func.coalesce(func.sum(StudySession.duration_seconds), 0))
-            .where(
+            select(
+                func.coalesce(
+                    func.sum(StudySession.duration_seconds),
+                    0,
+                )
+            ).where(
                 StudySession.user_id == member_id,
                 StudySession.group_id == group_id,
                 StudySession.started_at >= start_at,
                 StudySession.started_at < end_at,
             )
         ) or 0
+
         rows.append({
             "user_id": member_id,
             "name": name,
@@ -657,8 +836,18 @@ def group_period_rows(
             "hours": round(int(seconds) / 3600, 2),
         })
 
-    return sorted(rows, key=lambda row: (-row["seconds"], row["name"].lower()))
+    return sorted(
+        rows,
+        key=lambda row: (
+            -row["seconds"],
+            row["name"].lower(),
+        ),
+    )
 
+
+# ============================================================
+# MONTHLY WINNER FINALIZATION
+# ============================================================
 
 def save_month_winner(
     group_id: int,
@@ -666,53 +855,97 @@ def save_month_winner(
     end: date,
     db: Session,
 ):
+    """
+    Save a monthly winner once.
+
+    Existing finalized records are never overwritten.
+    """
     record = db.scalar(
         select(CompetitionWinner).where(
             CompetitionWinner.group_id == group_id,
             CompetitionWinner.period_start == start,
         )
     )
-    if record and record.period_end == end:
+
+    if record is not None:
         return record
 
-    board = group_period_rows(group_id, start, end, db)
-    winner = next((row for row in board if row["seconds"] > 0), None)
-    if record:
-        record.period_end = end
-        record.winner_user_id = winner["user_id"] if winner else None
-        record.winner_name = winner["name"] if winner else "No activity"
-        record.winning_seconds = winner["seconds"] if winner else 0
-    else:
-        record = CompetitionWinner(
-            group_id=group_id,
-            period_start=start,
-            period_end=end,
-            winner_user_id=winner["user_id"] if winner else None,
-            winner_name=winner["name"] if winner else "No activity",
-            winning_seconds=winner["seconds"] if winner else 0,
-        )
-        db.add(record)
+    board = group_period_rows(
+        group_id,
+        start,
+        end,
+        db,
+    )
+
+    winner = next(
+        (
+            row for row in board
+            if row["seconds"] > 0
+        ),
+        None,
+    )
+
+    record = CompetitionWinner(
+        group_id=group_id,
+        period_start=start,
+        period_end=end,
+        winner_user_id=(
+            winner["user_id"] if winner else None
+        ),
+        winner_name=(
+            winner["name"] if winner else "No activity"
+        ),
+        winning_seconds=(
+            winner["seconds"] if winner else 0
+        ),
+    )
+
+    db.add(record)
     db.commit()
     db.refresh(record)
+
     return record
 
 
-def finalize_completed_months(group: StudyGroup, db: Session):
-    current_month_start, _ = month_for(date.today())
-    first_month_start, _ = month_for(group.created_at.date())
+def finalize_completed_months(
+    group: StudyGroup,
+    db: Session,
+):
+    """
+    Finalize all completed months for this group.
+
+    The current month is never finalized.
+    """
+    today = india_today()
+
+    current_month_start, _ = month_for(today)
+
+    group_created_date = to_india_datetime(
+        group.created_at
+    ).date()
+
+    first_month_start, _ = month_for(
+        group_created_date
+    )
+
     month_start = first_month_start
 
     while month_start < current_month_start:
         _, month_end = month_for(month_start)
+
         save_month_winner(
             group.id,
             month_start,
             month_end,
             db,
         )
-        next_month = month_end + timedelta(days=1)
-        month_start = next_month
 
+        month_start = month_end + timedelta(days=1)
+
+
+# ============================================================
+# DATE-ROUND WINNER FINALIZATION
+# ============================================================
 
 def save_round_winner(
     group_id: int,
@@ -720,48 +953,99 @@ def save_round_winner(
     end: date,
     db: Session,
 ):
+    """
+    Save a date-round winner once.
+
+    Once saved, the historical result is immutable.
+    """
     record = db.scalar(
         select(CompetitionRoundWinner).where(
             CompetitionRoundWinner.group_id == group_id,
             CompetitionRoundWinner.period_start == start,
         )
     )
-    if record and record.period_end == end:
+
+    if record is not None:
         return record
 
-    board = group_period_rows(group_id, start, end, db)
-    winner = next((row for row in board if row["seconds"] > 0), None)
+    board = group_period_rows(
+        group_id,
+        start,
+        end,
+        db,
+    )
 
-    if record:
-        record.period_end = end
-        record.winner_user_id = winner["user_id"] if winner else None
-        record.winner_name = winner["name"] if winner else "No activity"
-        record.winning_seconds = winner["seconds"] if winner else 0
-    else:
-        record = CompetitionRoundWinner(
-            group_id=group_id,
-            period_start=start,
-            period_end=end,
-            winner_user_id=winner["user_id"] if winner else None,
-            winner_name=winner["name"] if winner else "No activity",
-            winning_seconds=winner["seconds"] if winner else 0,
-        )
-        db.add(record)
+    winner = next(
+        (
+            row for row in board
+            if row["seconds"] > 0
+        ),
+        None,
+    )
 
+    record = CompetitionRoundWinner(
+        group_id=group_id,
+        period_start=start,
+        period_end=end,
+        winner_user_id=(
+            winner["user_id"] if winner else None
+        ),
+        winner_name=(
+            winner["name"] if winner else "No activity"
+        ),
+        winning_seconds=(
+            winner["seconds"] if winner else 0
+        ),
+    )
+
+    db.add(record)
     db.commit()
     db.refresh(record)
+
     return record
 
 
-def finalize_completed_rounds(group: StudyGroup, db: Session):
-    current_start, _ = period_for(date.today())
-    round_start, _ = period_for(group.created_at.date())
+def finalize_completed_rounds(
+    group: StudyGroup,
+    db: Session,
+):
+    """
+    Finalize every completed date round.
+
+    Example:
+    On Nov 8, the Nov 1-7 round is finalized.
+    On Nov 15, the Nov 8-14 round is finalized.
+
+    The current round is never finalized.
+    """
+    today = india_today()
+
+    current_start, _ = period_for(today)
+
+    group_created_date = to_india_datetime(
+        group.created_at
+    ).date()
+
+    round_start, _ = period_for(
+        group_created_date
+    )
 
     while round_start < current_start:
         _, round_end = period_for(round_start)
-        save_round_winner(group.id, round_start, round_end, db)
+
+        save_round_winner(
+            group.id,
+            round_start,
+            round_end,
+            db,
+        )
+
         round_start = round_end + timedelta(days=1)
 
+
+# ============================================================
+# STARTER TOPICS
+# ============================================================
 
 def add_starter_dsa_topic(
     user_id: int,
@@ -773,10 +1057,15 @@ def add_starter_dsa_topic(
         group_id=group_id,
         name="DSA",
     )
+
     db.add(topic)
     db.flush()
+
     db.add_all([
-        Domain(topic_id=topic.id, name=name)
+        Domain(
+            topic_id=topic.id,
+            name=name,
+        )
         for name in (
             "Arrays and Strings",
             "Linked Lists",
@@ -787,63 +1076,102 @@ def add_starter_dsa_topic(
     ])
 
 
-def aware_datetime(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+# ============================================================
+# SESSION RETENTION
+# ============================================================
 
-    return value
-
-
-def prune_expired_sessions(user_id: Optional[int] = None) -> int:
+def prune_expired_sessions(
+    user_id: Optional[int] = None,
+) -> int:
     db = SessionLocal()
+
     try:
         groups_query = select(StudyGroup)
+
         if user_id is not None:
             groups_query = (
                 groups_query
-                .join(Membership, Membership.group_id == StudyGroup.id)
+                .join(
+                    Membership,
+                    Membership.group_id == StudyGroup.id,
+                )
                 .where(Membership.user_id == user_id)
             )
 
-        for group in db.scalars(groups_query).all():
-            finalize_completed_rounds(group, db)
-            finalize_completed_months(group, db)
+        groups = db.scalars(groups_query).all()
+
+        for group in groups:
+            finalize_completed_rounds(
+                group,
+                db,
+            )
+
+            finalize_completed_months(
+                group,
+                db,
+            )
 
         cutoff = datetime.now(timezone.utc) - timedelta(
             days=SESSION_RETENTION_DAYS
         )
+
         statement = (
             "DELETE FROM st_sessions WHERE ended_at < :cutoff"
         )
-        parameters = {"cutoff": cutoff}
+
+        parameters = {
+            "cutoff": cutoff,
+        }
+
         if user_id is not None:
             statement += " AND user_id = :user_id"
             parameters["user_id"] = user_id
 
-        result = db.execute(text(statement), parameters)
+        result = db.execute(
+            text(statement),
+            parameters,
+        )
+
         db.commit()
+
         return result.rowcount or 0
+
     except Exception:
         db.rollback()
         raise
+
     finally:
         db.close()
 
 
 async def session_retention_loop():
+    """
+    Check every 60 seconds.
+
+    This allows completed date rounds to be finalized
+    shortly after their IST boundary.
+    """
     while True:
         try:
-            deleted = await asyncio.to_thread(prune_expired_sessions)
+            deleted = await asyncio.to_thread(
+                prune_expired_sessions
+            )
+
             if deleted:
                 logger.info(
                     "Removed %s study sessions older than %s days.",
                     deleted,
                     SESSION_RETENTION_DAYS,
                 )
-        except Exception:
-            logger.exception("Automatic session retention failed.")
 
-        await asyncio.sleep(24 * 60 * 60)
+        except Exception:
+            logger.exception(
+                "Automatic session retention failed."
+            )
+
+        await asyncio.sleep(
+            RETENTION_CHECK_INTERVAL_SECONDS
+        )
 
 
 # ============================================================
@@ -851,9 +1179,17 @@ async def session_retention_loop():
 # ============================================================
 
 class RegisterIn(BaseModel):
-    name: str = Field(min_length=2, max_length=80)
+    name: str = Field(
+        min_length=2,
+        max_length=80,
+    )
+
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+
+    password: str = Field(
+        min_length=8,
+        max_length=128,
+    )
 
 
 class LoginIn(BaseModel):
@@ -862,24 +1198,41 @@ class LoginIn(BaseModel):
 
 
 class GroupIn(BaseModel):
-    name: str = Field(min_length=2, max_length=100)
+    name: str = Field(
+        min_length=2,
+        max_length=100,
+    )
 
 
 class JoinIn(BaseModel):
-    invite_code: str = Field(min_length=4, max_length=16)
+    invite_code: str = Field(
+        min_length=4,
+        max_length=16,
+    )
 
 
 class TopicIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    name: str = Field(
+        min_length=1,
+        max_length=80,
+    )
+
     group_id: Optional[int] = None
 
 
 class DomainIn(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
+    name: str = Field(
+        min_length=1,
+        max_length=100,
+    )
 
 
 class NoteIn(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+
     content: str = ""
     topic: str = "General"
     domain: str = "General"
@@ -887,17 +1240,47 @@ class NoteIn(BaseModel):
 
 
 class NoteAppendIn(BaseModel):
-    source_note_id: str = Field(min_length=1, max_length=120)
-    title: str = Field(default="Saved selection", max_length=200)
-    content: str = Field(min_length=1, max_length=50000)
-    topic: str = Field(default="General", min_length=1, max_length=80)
-    domain: str = Field(default="General", min_length=1, max_length=100)
-    source_url: Optional[str] = Field(default=None, max_length=2000)
+    source_note_id: str = Field(
+        min_length=1,
+        max_length=120,
+    )
+
+    title: str = Field(
+        default="Saved selection",
+        max_length=200,
+    )
+
+    content: str = Field(
+        min_length=1,
+        max_length=50000,
+    )
+
+    topic: str = Field(
+        default="General",
+        min_length=1,
+        max_length=80,
+    )
+
+    domain: str = Field(
+        default="General",
+        min_length=1,
+        max_length=100,
+    )
+
+    source_url: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+    )
+
     group_id: Optional[int] = None
 
 
 class NoteUpdate(BaseModel):
-    title: Optional[str] = Field(default=None, max_length=200)
+    title: Optional[str] = Field(
+        default=None,
+        max_length=200,
+    )
+
     content: Optional[str] = None
     topic: Optional[str] = None
     domain: Optional[str] = None
@@ -906,9 +1289,15 @@ class NoteUpdate(BaseModel):
 class SessionIn(BaseModel):
     topic: str = "General"
     domain: Optional[str] = None
-    duration_seconds: int = Field(ge=0, le=86400)
+
+    duration_seconds: int = Field(
+        ge=0,
+        le=86400,
+    )
+
     started_at: datetime
     ended_at: datetime
+
     site_url: Optional[str] = None
     site_title: Optional[str] = None
     group_id: Optional[int] = None
@@ -920,9 +1309,15 @@ class WebsiteSyncItem(BaseModel):
     domain: str
     subject: str = "General"
     group_id: Optional[int] = None
-    durationSeconds: int = Field(ge=0, le=86400)
+
+    durationSeconds: int = Field(
+        ge=0,
+        le=86400,
+    )
+
     startedAt: datetime
     endedAt: datetime
+
     title: Optional[str] = None
 
 
@@ -933,29 +1328,41 @@ class WebsiteSyncItem(BaseModel):
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _retention_task
-    _retention_task = asyncio.create_task(session_retention_loop())
+
+    _retention_task = asyncio.create_task(
+        session_retention_loop()
+    )
+
     try:
         yield
+
     finally:
         if _retention_task is not None:
             _retention_task.cancel()
+
             with suppress(asyncio.CancelledError):
                 await _retention_task
+
             _retention_task = None
 
 
-api_docs_enabled = os.getenv("ENABLE_API_DOCS", "false").strip().lower() in {
-    "1", "true", "yes"
-}
+api_docs_enabled = (
+    os.getenv(
+        "ENABLE_API_DOCS",
+        "false",
+    ).strip().lower()
+    in {"1", "true", "yes"}
+)
 
 app = FastAPI(
     title="StudyTrack API",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
     docs_url="/docs" if api_docs_enabled else None,
     redoc_url="/redoc" if api_docs_enabled else None,
     openapi_url="/openapi.json" if api_docs_enabled else None,
 )
+
 
 origins = [
     origin.strip()
@@ -965,6 +1372,7 @@ origins = [
     ).split(",")
     if origin.strip()
 ]
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -981,7 +1389,7 @@ def root():
     return {
         "app": "StudyTrack",
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
     }
 
 
@@ -990,14 +1398,21 @@ def health():
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+
     except Exception as error:
-        logger.exception("Health check database query failed.")
+        logger.exception(
+            "Health check database query failed."
+        )
+
         raise HTTPException(
             status_code=503,
             detail="Database unavailable.",
         ) from error
 
-    return {"status": "ok", "database": "ok"}
+    return {
+        "status": "ok",
+        "database": "ok",
+    }
 
 
 # ============================================================
@@ -1032,7 +1447,13 @@ def register(
     db.add(user)
     db.commit()
     db.refresh(user)
-    add_starter_dsa_topic(user.id, None, db)
+
+    add_starter_dsa_topic(
+        user.id,
+        None,
+        db,
+    )
+
     db.commit()
 
     return {
@@ -1078,7 +1499,9 @@ def login(
 
 
 @app.get("/auth/me")
-def me(user: User = Depends(current_user)):
+def me(
+    user: User = Depends(current_user),
+):
     return {
         "id": user.id,
         "name": user.name,
@@ -1120,7 +1543,12 @@ def create_group(
             user_id=user.id,
         )
     )
-    add_starter_dsa_topic(user.id, group.id, db)
+
+    add_starter_dsa_topic(
+        user.id,
+        group.id,
+        db,
+    )
 
     db.commit()
     db.refresh(group)
@@ -1160,6 +1588,7 @@ def join_group(
                 user_id=user.id,
             )
         )
+
         db.commit()
 
     return {
@@ -1213,14 +1642,20 @@ def list_topics(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
 
     query = select(Topic).where(
         Topic.group_id == group_id
     )
 
     if group_id is None:
-        query = query.where(Topic.user_id == user.id)
+        query = query.where(
+            Topic.user_id == user.id
+        )
 
     topics = db.scalars(
         query.order_by(Topic.name)
@@ -1257,7 +1692,11 @@ def create_topic(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(data.group_id, user, db)
+    workspace_group(
+        data.group_id,
+        user,
+        db,
+    )
 
     name = data.name.strip()
 
@@ -1265,8 +1704,11 @@ def create_topic(
         func.lower(Topic.name) == name.lower(),
         Topic.group_id == data.group_id,
     )
+
     if data.group_id is None:
-        query = query.where(Topic.user_id == user.id)
+        query = query.where(
+            Topic.user_id == user.id
+        )
 
     if db.scalar(query):
         raise HTTPException(
@@ -1299,7 +1741,10 @@ def create_domain(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    topic = db.get(Topic, topic_id)
+    topic = db.get(
+        Topic,
+        topic_id,
+    )
 
     if topic is None:
         raise HTTPException(
@@ -1313,7 +1758,12 @@ def create_domain(
                 status_code=404,
                 detail="Topic not found.",
             )
-    elif not member_of(db, topic.group_id, user.id):
+
+    elif not member_of(
+        db,
+        topic.group_id,
+        user.id,
+    ):
         raise HTTPException(
             status_code=403,
             detail="You are not a member of this group.",
@@ -1375,7 +1825,11 @@ def create_session(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(data.group_id, user, db)
+    workspace_group(
+        data.group_id,
+        user,
+        db,
+    )
 
     if data.source_session_id:
         existing = db.scalar(
@@ -1391,6 +1845,7 @@ def create_session(
                     status_code=409,
                     detail="This session ID is already in use.",
                 )
+
             return {
                 **session_json(existing),
                 "duplicate": True,
@@ -1405,9 +1860,11 @@ def create_session(
             detail="Session end time cannot be before its start time.",
         )
 
-    retention_cutoff = datetime.now(timezone.utc) - timedelta(
-        days=SESSION_RETENTION_DAYS
+    retention_cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(days=SESSION_RETENTION_DAYS)
     )
+
     if ended < retention_cutoff:
         raise HTTPException(
             status_code=410,
@@ -1444,7 +1901,11 @@ def website_sync(
     expired = 0
 
     for item in items:
-        workspace_group(item.group_id, user, db)
+        workspace_group(
+            item.group_id,
+            user,
+            db,
+        )
 
         existing = db.scalar(
             select(StudySession).where(
@@ -1453,9 +1914,10 @@ def website_sync(
         )
 
         if existing:
-            # Never let one user's sync overwrite another user's session.
+            # Never allow one user's sync to overwrite another user's session.
             if existing.user_id != user.id:
                 continue
+
             continue
 
         host = re.sub(
@@ -1474,9 +1936,11 @@ def website_sync(
         if ended < started:
             continue
 
-        retention_cutoff = datetime.now(timezone.utc) - timedelta(
-            days=SESSION_RETENTION_DAYS
+        retention_cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(days=SESSION_RETENTION_DAYS)
         )
+
         if ended < retention_cutoff:
             expired += 1
             continue
@@ -1498,26 +1962,39 @@ def website_sync(
 
     db.commit()
 
-    return {"saved": saved, "expired": expired}
+    return {
+        "saved": saved,
+        "expired": expired,
+    }
 
 
 @app.get("/sessions")
 def list_sessions(
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(
+        100,
+        ge=1,
+        le=500,
+    ),
     group_id: Optional[int] = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
 
     query = select(StudySession).where(
         StudySession.user_id == user.id,
         StudySession.group_id == group_id,
     )
 
-    query = query.order_by(
-        StudySession.started_at.desc()
-    ).limit(limit)
+    query = (
+        query
+        .order_by(StudySession.started_at.desc())
+        .limit(limit)
+    )
 
     return [
         session_json(session)
@@ -1548,7 +2025,11 @@ def create_note(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(data.group_id, user, db)
+    workspace_group(
+        data.group_id,
+        user,
+        db,
+    )
 
     note = NotePage(
         user_id=user.id,
@@ -1572,7 +2053,11 @@ def append_topic_note(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(data.group_id, user, db)
+    workspace_group(
+        data.group_id,
+        user,
+        db,
+    )
 
     existing_event = db.scalar(
         select(NoteAppendEvent).where(
@@ -1580,18 +2065,28 @@ def append_topic_note(
             NoteAppendEvent.source_note_id == data.source_note_id,
         )
     )
+
     if existing_event:
-        existing_page = db.get(NotePage, existing_event.note_page_id)
+        existing_page = db.get(
+            NotePage,
+            existing_event.note_page_id,
+        )
+
         if existing_page:
-            return {**note_json(existing_page), "appended": False}
+            return {
+                **note_json(existing_page),
+                "appended": False,
+            }
 
     topic = data.topic.strip()
     domain = data.domain.strip() or "General"
+
     notebook_title = (
         f"{topic} Notes"
         if domain == "General"
         else f"{topic} - {domain} Notes"
     )
+
     notebook = db.scalar(
         select(NotePage)
         .where(
@@ -1612,30 +2107,49 @@ def append_topic_note(
             title=notebook_title,
             content="",
         )
+
         db.add(notebook)
         db.flush()
 
-    captured_at = datetime.now(timezone.utc).isoformat(timespec="minutes")
-    source = f"\nSource: {data.source_url}" if data.source_url else ""
+    captured_at = datetime.now(
+        timezone.utc
+    ).isoformat(timespec="minutes")
+
+    source = (
+        f"\nSource: {data.source_url}"
+        if data.source_url
+        else ""
+    )
+
     entry = (
-        f"[{captured_at}] {data.title.strip() or 'Saved selection'}\n"
+        f"[{captured_at}] "
+        f"{data.title.strip() or 'Saved selection'}\n"
         f"{data.content.strip()}{source}"
     )
+
     notebook.content = (
         f"{notebook.content.rstrip()}\n\n---\n\n{entry}"
         if notebook.content.strip()
         else entry
     )
+
     notebook.updated_at = datetime.now(timezone.utc)
-    db.add(NoteAppendEvent(
-        user_id=user.id,
-        source_note_id=data.source_note_id,
-        note_page_id=notebook.id,
-    ))
+
+    db.add(
+        NoteAppendEvent(
+            user_id=user.id,
+            source_note_id=data.source_note_id,
+            note_page_id=notebook.id,
+        )
+    )
+
     db.commit()
     db.refresh(notebook)
 
-    return {**note_json(notebook), "appended": True}
+    return {
+        **note_json(notebook),
+        "appended": True,
+    }
 
 
 @app.get("/notes")
@@ -1645,11 +2159,20 @@ def list_notes(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
 
-    query = select(NotePage).where(NotePage.group_id == group_id)
+    query = select(NotePage).where(
+        NotePage.group_id == group_id
+    )
+
     if group_id is None:
-        query = query.where(NotePage.user_id == user.id)
+        query = query.where(
+            NotePage.user_id == user.id
+        )
 
     if search.strip():
         pattern = f"%{search.strip()}%"
@@ -1681,7 +2204,10 @@ def update_note(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    note = db.get(NotePage, note_id)
+    note = db.get(
+        NotePage,
+        note_id,
+    )
 
     if note is None or note.user_id != user.id:
         raise HTTPException(
@@ -1689,12 +2215,19 @@ def update_note(
             detail="Note not found.",
         )
 
-    updates = data.model_dump(exclude_unset=True)
+    updates = data.model_dump(
+        exclude_unset=True
+    )
 
     for key, value in updates.items():
         if value is not None:
             if isinstance(value, str):
-                value = value.strip() if key != "content" else value
+                value = (
+                    value.strip()
+                    if key != "content"
+                    else value
+                )
+
             setattr(note, key, value)
 
     note.updated_at = datetime.now(timezone.utc)
@@ -1711,7 +2244,10 @@ def delete_note(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    note = db.get(NotePage, note_id)
+    note = db.get(
+        NotePage,
+        note_id,
+    )
 
     if note is None or note.user_id != user.id:
         raise HTTPException(
@@ -1722,7 +2258,9 @@ def delete_note(
     db.delete(note)
     db.commit()
 
-    return {"ok": True}
+    return {
+        "ok": True,
+    }
 
 
 # ============================================================
@@ -1735,7 +2273,11 @@ def dashboard(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
 
     query = select(StudySession).where(
         StudySession.user_id == user.id,
@@ -1744,14 +2286,31 @@ def dashboard(
 
     sessions = db.scalars(query).all()
 
-    today = datetime.now(timezone.utc).date()
-    week_start = today - timedelta(days=6)
-    history_start = today - timedelta(days=SESSION_RETENTION_DAYS - 1)
+    # Dashboard calendar dates use IST.
+    today = india_today()
 
-    today_seconds = sum(
-        session.duration_seconds
-        for session in sessions
-        if session.started_at.date() == today
+    week_start = today - timedelta(days=6)
+
+    history_start = today - timedelta(
+        days=SESSION_RETENTION_DAYS - 1
+    )
+
+    daily_totals = {}
+
+    for session in sessions:
+        session_day = to_india_datetime(
+            session.started_at
+        ).date()
+
+        if history_start <= session_day <= today:
+            daily_totals[session_day] = (
+                daily_totals.get(session_day, 0)
+                + session.duration_seconds
+            )
+
+    today_seconds = daily_totals.get(
+        today,
+        0,
     )
 
     weekly = []
@@ -1759,35 +2318,33 @@ def dashboard(
     for offset in range(7):
         day = week_start + timedelta(days=offset)
 
-        seconds = sum(
-            session.duration_seconds
-            for session in sessions
-            if session.started_at.date() == day
-        )
-
         weekly.append({
             "date": day.isoformat(),
-            "seconds": seconds,
+            "seconds": daily_totals.get(day, 0),
         })
-
-    daily_totals = {}
-    for session in sessions:
-        session_day = aware_datetime(session.started_at).date()
-        if history_start <= session_day <= today:
-            daily_totals[session_day] = (
-                daily_totals.get(session_day, 0) + session.duration_seconds
-            )
 
     daily_study = [
         {
-            "date": (history_start + timedelta(days=offset)).isoformat(),
-            "seconds": daily_totals.get(history_start + timedelta(days=offset), 0),
+            "date": (
+                history_start + timedelta(days=offset)
+            ).isoformat(),
+
+            "seconds": daily_totals.get(
+                history_start + timedelta(days=offset),
+                0,
+            ),
         }
         for offset in range(SESSION_RETENTION_DAYS)
     ]
 
-    streak_cursor = today if daily_totals.get(today, 0) > 0 else today - timedelta(days=1)
+    streak_cursor = (
+        today
+        if daily_totals.get(today, 0) > 0
+        else today - timedelta(days=1)
+    )
+
     current_streak = 0
+
     while (
         streak_cursor >= history_start
         and daily_totals.get(streak_cursor, 0) > 0
@@ -1839,13 +2396,48 @@ def leaderboard(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
-    group = db.get(StudyGroup, group_id)
-    finalize_completed_rounds(group, db)
-    finalize_completed_months(group, db)
-    start, end = period_for(date.today())
-    rows = group_period_rows(group_id, start, end, db)
-    month_start, month_end = month_for(date.today())
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    group = db.get(
+        StudyGroup,
+        group_id,
+    )
+
+    if group is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Group not found.",
+        )
+
+    # Save any completed rounds/months that may not have been
+    # processed by the background task yet.
+    finalize_completed_rounds(
+        group,
+        db,
+    )
+
+    finalize_completed_months(
+        group,
+        db,
+    )
+
+    today = india_today()
+
+    start, end = period_for(today)
+
+    rows = group_period_rows(
+        group_id,
+        start,
+        end,
+        db,
+    )
+
+    month_start, month_end = month_for(today)
+
     monthly_winner = db.scalar(
         select(CompetitionWinner).where(
             CompetitionWinner.group_id == group_id,
@@ -1860,10 +2452,14 @@ def leaderboard(
         "month_start": month_start.isoformat(),
         "month_end": month_end.isoformat(),
         "leaderboard": rows,
-        "month_winner": None if monthly_winner is None else {
-            "name": monthly_winner.winner_name,
-            "seconds": monthly_winner.winning_seconds,
-        },
+        "month_winner": (
+            None
+            if monthly_winner is None
+            else {
+                "name": monthly_winner.winner_name,
+                "seconds": monthly_winner.winning_seconds,
+            }
+        ),
     }
 
 
@@ -1873,7 +2469,10 @@ def finalize_period(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    group = db.get(StudyGroup, group_id)
+    group = db.get(
+        StudyGroup,
+        group_id,
+    )
 
     if group is None or group.created_by != user.id:
         raise HTTPException(
@@ -1881,16 +2480,32 @@ def finalize_period(
             detail="Only the group creator can finalize a competition period.",
         )
 
-    current_month_start, _ = month_for(date.today())
-    start, end = month_for(current_month_start - timedelta(days=1))
+    # This endpoint finalizes the previous completed month.
+    current_month_start, _ = month_for(
+        india_today()
+    )
+
+    previous_month_day = (
+        current_month_start - timedelta(days=1)
+    )
+
+    start, end = month_for(
+        previous_month_day
+    )
+
     existing = db.scalar(
         select(CompetitionWinner).where(
             CompetitionWinner.group_id == group_id,
             CompetitionWinner.period_start == start,
-            CompetitionWinner.period_end == end,
         )
     )
-    record = save_month_winner(group_id, start, end, db)
+
+    record = save_month_winner(
+        group_id,
+        start,
+        end,
+        db,
+    )
 
     return {
         "winner": record.winner_name,
@@ -1907,18 +2522,43 @@ def winners(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
-    group = db.get(StudyGroup, group_id)
-    finalize_completed_months(group, db)
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    group = db.get(
+        StudyGroup,
+        group_id,
+    )
+
+    if group is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Group not found.",
+        )
+
+    finalize_completed_months(
+        group,
+        db,
+    )
 
     stored_records = db.scalars(
         select(CompetitionWinner)
-        .where(CompetitionWinner.group_id == group_id)
-        .order_by(CompetitionWinner.period_start.desc())
+        .where(
+            CompetitionWinner.group_id == group_id
+        )
+        .order_by(
+            CompetitionWinner.period_start.desc()
+        )
     ).all()
+
     records = [
-        record for record in stored_records
-        if month_for(record.period_start)[1] == record.period_end
+        record
+        for record in stored_records
+        if month_for(record.period_start)[1]
+        == record.period_end
     ][:4]
 
     return [
@@ -1938,14 +2578,37 @@ def round_winners(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    workspace_group(group_id, user, db)
-    group = db.get(StudyGroup, group_id)
-    finalize_completed_rounds(group, db)
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    group = db.get(
+        StudyGroup,
+        group_id,
+    )
+
+    if group is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Group not found.",
+        )
+
+    # Ensure all completed rounds are saved before returning history.
+    finalize_completed_rounds(
+        group,
+        db,
+    )
 
     records = db.scalars(
         select(CompetitionRoundWinner)
-        .where(CompetitionRoundWinner.group_id == group_id)
-        .order_by(CompetitionRoundWinner.period_start.desc())
+        .where(
+            CompetitionRoundWinner.group_id == group_id
+        )
+        .order_by(
+            CompetitionRoundWinner.period_start.desc()
+        )
         .limit(12)
     ).all()
 
@@ -1961,7 +2624,7 @@ def round_winners(
 
 
 # ============================================================
-# SESSION RETENTION
+# SESSION RETENTION ENDPOINT
 # ============================================================
 
 @app.post("/maintenance/cleanup-old-sessions")
@@ -1969,6 +2632,8 @@ def cleanup_old_sessions(
     user: User = Depends(current_user),
 ):
     return {
-        "deleted_sessions": prune_expired_sessions(user.id),
+        "deleted_sessions": prune_expired_sessions(
+            user.id
+        ),
         "retention_days": SESSION_RETENTION_DAYS,
     }
