@@ -1,10 +1,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  Activity, ArrowUpRight, BookOpen, Check,
+  Activity, ArrowUpRight, Bell, BellRing, BookOpen, Check, CheckCheck,
   Clock3, Code2, FileText, Flame, FolderOpen,
-  LayoutDashboard, LoaderCircle, LogOut, Plus, RefreshCw,
-  Search, Target, Trash2, Trophy, UserRound, Users, X, Crown, Sparkles,
+  LayoutDashboard, LoaderCircle, LogOut, PartyPopper, Plus, RefreshCw,
+  Search, Sparkles, Target, Trash2, Trophy, UserRound, Users, X,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip,
@@ -14,6 +14,19 @@ import {
 const API_URL = (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "");
 const AUTH_KEY = "studytrack_auth";
 
+function readLocalArray(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function roundWinnerNotificationId(groupId, periodStart) {
+  return `round-winner:${groupId}:${periodStart}`;
+}
+
 // Returns today's date in the browser's local timezone (YYYY-MM-DD).
 function getTodayDate() {
   const today = new Date();
@@ -21,55 +34,6 @@ function getTodayDate() {
   const month = String(today.getMonth() + 1).padStart(2, "0");
   const day = String(today.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-
-// Date-rounds are fixed calendar blocks: 1–7, 8–14, 15–21, 22–month-end.
-// Normalize the displayed end date from the start date so an inclusive
-// backend end-date mistake (for example 1–8) is never shown in the UI.
-function getDateRoundEnd(periodStart) {
-  if (!periodStart) return null;
-  const match = String(periodStart).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const startDay = Number(match[3]);
-  const lastDay = new Date(year, month, 0).getDate();
-  const endDay = startDay <= 1 ? 7 : startDay <= 8 ? 14 : startDay <= 15 ? 21 : lastDay;
-  return `${match[1]}-${match[2]}-${String(Math.min(endDay, lastDay)).padStart(2, "0")}`;
-}
-
-function getIndiaDateParts(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(date);
-  return Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
-}
-
-function getNextDateRoundBoundary() {
-  const { year, month, day } = getIndiaDateParts();
-  const boundaries = [1, 8, 15, 22];
-  let targetDay = boundaries.find((value) => value > day);
-  let targetYear = year;
-  let targetMonth = month;
-  if (!targetDay) {
-    targetDay = 1;
-    targetMonth += 1;
-    if (targetMonth > 12) { targetMonth = 1; targetYear += 1; }
-  }
-  // IST is UTC+05:30. This creates the exact instant for midnight IST.
-  return new Date(Date.UTC(targetYear, targetMonth - 1, targetDay, 0, 0, 0) - (5.5 * 60 * 60 * 1000));
-}
-
-function getCurrentDateRound() {
-  const { year, month, day } = getIndiaDateParts();
-  const startDay = day <= 7 ? 1 : day <= 14 ? 8 : day <= 21 ? 15 : 22;
-  const lastDay = new Date(year, month, 0).getDate();
-  const endDay = startDay === 1 ? 7 : startDay === 8 ? 14 : startDay === 15 ? 21 : lastDay;
-  const monthText = String(month).padStart(2, "0");
-  return {
-    start: `${year}-${monthText}-${String(startDay).padStart(2, "0")}`,
-    end: `${year}-${monthText}-${String(Math.min(endDay, lastDay)).padStart(2, "0")}`,
-  };
 }
 
 function apiFetch(token, path, options = {}) {
@@ -192,11 +156,11 @@ function StreakCalendar({ days = [], streak = 0 }) {
           {cells.map((day) => day.blank
             ? <span className="streak-cell streak-cell-blank" key={day.key} aria-hidden="true" />
             : <span
-                className={`streak-cell level-${level(day.seconds)}`}
-                key={day.key}
-                title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
-                aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
-              />)}
+              className={`streak-cell level-${level(day.seconds)}`}
+              key={day.key}
+              title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
+              aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
+            />)}
         </div>
       </div>
     </section>
@@ -431,7 +395,16 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState(null);
   const [winners, setWinners] = useState([]);
   const [roundWinners, setRoundWinners] = useState([]);
+  const [notifications, setNotifications] = useState(() =>
+    profile?.id ? readLocalArray(`studytrack_notifications_${profile.id}`) : []
+  );
+  const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [selectedRoundWinner, setSelectedRoundWinner] = useState(null);
+  const [browserNotificationPermission, setBrowserNotificationPermission] = useState(() =>
+    typeof window !== "undefined" && "Notification" in window
+      ? Notification.permission
+      : "unsupported"
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -546,33 +519,126 @@ export default function App() {
     }
   }, [profile, activeGroupId]);
 
+  const checkRoundWinnerAnnouncements = useCallback(async () => {
+    if (!profile?.token || !groups.length) return;
+    try {
+      const notificationKey = `studytrack_notifications_${profile.id}`;
+      const previousNotifications = readLocalArray(notificationKey);
+      const allFreshNotifications = [];
+
+      // Check every group the user belongs to, even while using Individual workspace.
+      for (const group of groups) {
+        const groupId = String(group.id);
+        const response = await apiFetch(
+          profile.token,
+          `/groups/${groupId}/round-winners`
+        );
+        if (!response.ok) continue;
+        const currentWinners = await response.json();
+        if (!Array.isArray(currentWinners)) continue;
+
+        const knownKey = `studytrack_known_round_winners_${profile.id}_${groupId}`;
+        const currentKeys = currentWinners
+          .filter((winner) => winner?.period_start)
+          .map((winner) => roundWinnerNotificationId(groupId, winner.period_start));
+        const storedKnown = localStorage.getItem(knownKey);
+
+        // First visit establishes a baseline. Historical winners are not announced as new.
+        if (storedKnown === null) {
+          localStorage.setItem(knownKey, JSON.stringify(currentKeys));
+          continue;
+        }
+
+        let knownKeys = [];
+        try {
+          const parsed = JSON.parse(storedKnown);
+          knownKeys = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          knownKeys = [];
+        }
+        const knownSet = new Set(knownKeys);
+        const freshWinners = currentWinners.filter((winner) =>
+          winner?.period_start && winner.winner && winner.winner !== "No activity" &&
+          Number(winner.seconds) > 0 && !knownSet.has(
+            roundWinnerNotificationId(groupId, winner.period_start)
+          )
+        );
+        if (!freshWinners.length) continue;
+
+        const createdAt = new Date().toISOString();
+        const newNotifications = freshWinners.map((winner) => ({
+          id: roundWinnerNotificationId(groupId, winner.period_start),
+          groupId,
+          groupName: group.name || "Your study group",
+          winner: winner.winner,
+          period_start: winner.period_start,
+          period_end: winner.period_end,
+          seconds: Number(winner.seconds) || 0,
+          createdAt,
+          read: false,
+        }));
+        allFreshNotifications.push(...newNotifications);
+        localStorage.setItem(knownKey, JSON.stringify([
+          ...knownKeys,
+          ...newNotifications.map((item) => item.id),
+        ]));
+      }
+
+      if (!allFreshNotifications.length) return;
+      const mergedNotifications = [...allFreshNotifications, ...previousNotifications]
+        .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
+        .slice(0, 100);
+      localStorage.setItem(notificationKey, JSON.stringify(mergedNotifications));
+      setNotifications(mergedNotifications);
+
+      if ("Notification" in window && Notification.permission === "granted") {
+        allFreshNotifications.forEach((item) => {
+          const browserNotice = new Notification(`🏆 ${item.winner} won ${item.groupName}!`, {
+            body: `${formatDate(item.period_start)} – ${formatDate(item.period_end)} · ${formatDuration(item.seconds)} study time`,
+            tag: item.id,
+          });
+          browserNotice.onclick = () => window.focus();
+        });
+      }
+    } catch (err) {
+      console.warn("Could not check round-winner announcements:", err);
+    }
+  }, [profile, groups]);
+
   useEffect(() => {
     if (profile?.token) queueMicrotask(() => void loadDashboard());
   }, [profile?.token, activeGroupId, loadDashboard]);
 
-  // Refresh competition standings exactly when a new date-round starts in IST
-  // (1st, 8th, 15th, or 22nd at 12:00 AM), and when the tab becomes visible.
   useEffect(() => {
-    if (!profile?.token) return undefined;
-    let timer;
-    const scheduleBoundaryRefresh = () => {
-      window.clearTimeout(timer);
-      const delay = Math.max(1000, getNextDateRoundBoundary().getTime() - Date.now() + 1200);
-      timer = window.setTimeout(() => {
-        void loadDashboard();
-        scheduleBoundaryRefresh();
-      }, delay);
-    };
+    if (!profile?.token || !groups.length) return undefined;
+    void checkRoundWinnerAnnouncements();
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void checkRoundWinnerAnnouncements();
+      }
+    }, 45000);
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") void loadDashboard();
+      if (document.visibilityState === "visible") void checkRoundWinnerAnnouncements();
     };
-    scheduleBoundaryRefresh();
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
-      window.clearTimeout(timer);
+      window.clearInterval(intervalId);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [profile?.token, loadDashboard]);
+  }, [profile?.token, groups, checkRoundWinnerAnnouncements]);
+
+  useEffect(() => {
+    if (!profile?.id) return;
+    setNotifications(readLocalArray(`studytrack_notifications_${profile.id}`));
+  }, [profile?.id]);
+
+  useEffect(() => {
+    if (!("Notification" in window)) {
+      setBrowserNotificationPermission("unsupported");
+      return;
+    }
+    setBrowserNotificationPermission(Notification.permission);
+  }, []);
 
   useEffect(() => {
     if (!profile?.token) return;
@@ -617,12 +683,6 @@ export default function App() {
   const selectedTopicDomains = topics.find(
     (topic) => topic.name === noteForm.topic
   )?.domains || [];
-  const currentDateRound = getCurrentDateRound();
-  const roundWinCounts = roundWinners.reduce((counts, item) => {
-    const key = (item.winner || "").trim().toLowerCase();
-    if (key) counts[key] = (counts[key] || 0) + 1;
-    return counts;
-  }, {});
 
   async function submitTopic(event) {
     event.preventDefault();
@@ -901,6 +961,45 @@ export default function App() {
     }
   }
 
+  function requestBrowserNotifications() {
+    if (!("Notification" in window)) {
+      setBrowserNotificationPermission("unsupported");
+      return;
+    }
+    Notification.requestPermission().then((permission) => {
+      setBrowserNotificationPermission(permission);
+      if (permission === "granted") {
+        setNotice("Browser notifications enabled for new group winners.");
+      }
+    });
+  }
+
+  function markNotificationRead(notificationId) {
+    const updated = notifications.map((item) =>
+      item.id === notificationId ? { ...item, read: true } : item
+    );
+    setNotifications(updated);
+    if (profile?.id) {
+      localStorage.setItem(`studytrack_notifications_${profile.id}`, JSON.stringify(updated));
+    }
+  }
+
+  function markAllNotificationsRead() {
+    const updated = notifications.map((item) => ({ ...item, read: true }));
+    setNotifications(updated);
+    if (profile?.id) {
+      localStorage.setItem(`studytrack_notifications_${profile.id}`, JSON.stringify(updated));
+    }
+  }
+
+  function openWinnerFromNotification(item) {
+    markNotificationRead(item.id);
+    setActivePage("competition");
+    if (String(item.groupId) !== activeGroupId) changeWorkspace(String(item.groupId));
+    setSelectedRoundWinner(item);
+    setShowNotificationPanel(false);
+  }
+
   function changeWorkspace(nextGroupId) {
     setActiveGroupId(nextGroupId);
     if (nextGroupId) localStorage.setItem("studytrack_workspace", nextGroupId);
@@ -912,9 +1011,10 @@ export default function App() {
     sessions: ["Study sessions", "Review the time you've spent learning."],
     notes: ["My notes", "Keep your learning and ideas in one place."],
     topics: ["Your topics", "Organize your learning by subject."],
-    competition: ["Date-round competition", "Track four date-based rounds (1–7, 8–14, 15–21, 22–month-end) and your group’s monthly champion."],
+    competition: ["Date-round competition", "Track four weekly rounds and your group’s monthly champion."],
   };
   const [pageTitle, pageSubtitle] = pageTitles[activePage];
+  const unreadNotificationCount = notifications.filter((item) => !item.read).length;
 
   if (!profile?.token) {
     return <AuthWelcome onAuthenticate={authenticate} busy={profileBusy} error={profileError} />;
@@ -922,33 +1022,6 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <style>{`
-        .winner-row-clickable { width: 100%; text-align: left; cursor: pointer; position: relative; transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; }
-        .winner-row-clickable:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(109, 83, 210, .14); border-color: #b8a8ff; }
-        .winner-row-clickable:focus-visible { outline: 3px solid #9b87ff; outline-offset: 3px; }
-        .winner-sparkle-icon { color: #a78bfa; opacity: .7; margin-left: 8px; }
-        .repeat-champion { background: linear-gradient(100deg, rgba(255, 244, 204, .7), rgba(255,255,255,.92)); }
-        .repeat-crown { display: inline-flex; align-items: center; gap: 3px; margin-left: 9px; color: #b7791f; font-size: 11px; font-weight: 800; vertical-align: middle; }
-        .champion-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(18, 14, 38, .72); backdrop-filter: blur(8px); animation: championFade .25s ease both; }
-        .champion-card { position: relative; overflow: hidden; width: min(100%, 460px); padding: 38px 28px 30px; border: 1px solid rgba(255,255,255,.65); border-radius: 28px; text-align: center; color: #30224f; background: radial-gradient(circle at 50% 0%, #fff8d8 0, #fff 48%, #f5f0ff 100%); box-shadow: 0 28px 90px rgba(0,0,0,.35); animation: championPop .55s cubic-bezier(.2,1.4,.4,1) both; }
-        .champion-crown { display: grid; place-items: center; width: 82px; height: 82px; margin: 0 auto 15px; color: #a66b00; border-radius: 50%; background: linear-gradient(145deg,#fff0a8,#ffd45e); box-shadow: 0 10px 30px #d69b343d; animation: crownFloat 2.5s ease-in-out infinite; }
-        .champion-kicker { color: #9b6b17; font-size: 11px; font-weight: 900; letter-spacing: .18em; }
-        .champion-name { margin: 10px 0 8px; font-size: clamp(28px, 7vw, 40px); line-height: 1.1; font-weight: 900; }
-        .champion-period { color: #776b91; font-size: 13px; }
-        .champion-time { display: inline-block; margin-top: 18px; padding: 10px 18px; border-radius: 999px; color: #5b43b5; background: #eee9ff; font-weight: 850; }
-        .champion-sparkles { position: absolute; inset: 0; pointer-events: none; }
-        .champion-sparkles span { position: absolute; color: #e0a51a; animation: sparkle 1.8s ease-in-out infinite; }
-        .champion-sparkles span:nth-child(1) { top: 15%; left: 12%; font-size: 25px; }
-        .champion-sparkles span:nth-child(2) { top: 22%; right: 13%; font-size: 31px; animation-delay: .3s; }
-        .champion-sparkles span:nth-child(3) { bottom: 25%; left: 8%; font-size: 20px; animation-delay: .6s; }
-        .champion-sparkles span:nth-child(4) { bottom: 20%; right: 9%; font-size: 26px; animation-delay: .9s; }
-        .champion-close { margin-top: 24px; }
-        @keyframes championFade { from { opacity: 0 } to { opacity: 1 } }
-        @keyframes championPop { from { opacity: 0; transform: translateY(22px) scale(.82) } to { opacity: 1; transform: translateY(0) scale(1) } }
-        @keyframes crownFloat { 0%,100% { transform: translateY(0) rotate(-3deg) } 50% { transform: translateY(-7px) rotate(3deg) } }
-        @keyframes sparkle { 0%,100% { opacity: .35; transform: scale(.7) rotate(0) } 50% { opacity: 1; transform: scale(1.25) rotate(22deg) } }
-        @media (prefers-reduced-motion: reduce) { .winner-row-clickable, .champion-backdrop, .champion-card, .champion-crown, .champion-sparkles span { animation: none !important; transition: none !important; } }
-      `}</style>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><BookOpen size={23} /></div>
@@ -1007,7 +1080,31 @@ export default function App() {
           </label>
           <div className="topbar-right">
             <span className="connection-status"><span className={`status-dot ${error ? "offline" : ""}`} />{error ? "Connection issue" : "StudyTrack API"}</span>
-            <button className="icon-button" title="Refresh dashboard" aria-label="Refresh dashboard" onClick={() => { setLoading(true); void loadDashboard(); }} disabled={loading}><RefreshCw size={17} className={loading ? "spin" : ""} /></button>
+            <div className="notification-anchor">
+              <button type="button" className={`icon-button notification-bell ${unreadNotificationCount ? "has-unread" : ""}`} title="Notifications" aria-label={`Notifications${unreadNotificationCount ? `, ${unreadNotificationCount} unread` : ""}`} onClick={() => setShowNotificationPanel((value) => !value)}>
+                {unreadNotificationCount ? <BellRing size={18} /> : <Bell size={18} />}
+                {unreadNotificationCount > 0 && <span className="notification-count">{unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}</span>}
+              </button>
+              {showNotificationPanel && <section className="notification-panel" aria-label="Notifications">
+                <div className="notification-panel-heading"><div><strong>Notifications</strong><span>{unreadNotificationCount ? `${unreadNotificationCount} unread` : "You're all caught up"}</span></div><button type="button" className="icon-button" onClick={() => setShowNotificationPanel(false)} aria-label="Close notifications"><X size={16} /></button></div>
+                <div className="notification-settings-row">
+                  {browserNotificationPermission === "granted"
+                    ? <span className="notification-permission enabled"><Check size={14} /> Browser alerts enabled</span>
+                    : browserNotificationPermission === "denied"
+                      ? <span className="notification-permission">Browser alerts blocked in browser settings</span>
+                      : browserNotificationPermission === "unsupported"
+                        ? <span className="notification-permission">Browser alerts aren't supported here</span>
+                        : <button type="button" className="text-button" onClick={requestBrowserNotifications}><Bell size={14} /> Enable browser notifications</button>}
+                  {unreadNotificationCount > 0 && <button type="button" className="text-button" onClick={markAllNotificationsRead}><CheckCheck size={14} /> Mark all read</button>}
+                </div>
+                <div className="notification-list">
+                  {notifications.length ? notifications.slice(0, 20).map((item) => <button type="button" className={`notification-item ${item.read ? "" : "unread"}`} key={item.id} onClick={() => openWinnerFromNotification(item)}>
+                    <span className="notification-item-icon"><Trophy size={17} /></span><span className="notification-item-copy"><strong>{item.winner} won a date round!</strong><span>{item.groupName} · {formatDate(item.period_start)} – {formatDate(item.period_end)}</span><small>{formatDuration(item.seconds)} study time · {formatTime(item.createdAt)}</small></span>{!item.read && <i className="notification-unread-dot" />}
+                  </button>) : <div className="notification-empty"><Bell size={22} /><strong>No announcements yet</strong><span>New group winners will appear here.</span></div>}
+                </div>
+              </section>}
+            </div>
+            <button className="icon-button" title="Refresh dashboard" aria-label="Refresh dashboard" onClick={() => { setLoading(true); void loadDashboard(); void checkRoundWinnerAnnouncements(); }} disabled={loading}><RefreshCw size={17} className={loading ? "spin" : ""} /></button>
             <div className="avatar top-avatar">{getInitials(profile.name)}</div>
           </div>
         </header>
@@ -1155,7 +1252,7 @@ export default function App() {
               <div className="competition-actions"><button className="primary-button" onClick={() => setGroupDialog("create")}><Plus size={16} /> Create group</button><button className="secondary-button" onClick={() => setGroupDialog("join")}><Users size={16} /> Join group</button></div>
             </section> : <>
               <section className="panel page-panel">
-                <div className="panel-heading page-panel-heading"><div><span className="modal-kicker">DATE ROUND STANDINGS</span><h2>{groups.find((group) => String(group.id) === activeGroupId)?.name || "Group"}</h2><p>Current round: {formatDate(currentDateRound.start)} – {formatDate(currentDateRound.end)}</p><p>Monthly champion counts study time from {formatDate(leaderboard?.month_start)} to {formatDate(leaderboard?.month_end)}.</p></div><Trophy size={24} /></div>
+                <div className="panel-heading page-panel-heading"><div><span className="modal-kicker">DATE ROUND STANDINGS</span><h2>{groups.find((group) => String(group.id) === activeGroupId)?.name || "Group"}</h2><p>Current round: {formatDate(leaderboard?.period_start)} – {formatDate(leaderboard?.period_end)}</p><p>Monthly champion counts study time from {formatDate(leaderboard?.month_start)} to {formatDate(leaderboard?.month_end)}.</p></div><Trophy size={24} /></div>
                 <div className="invite-code-row"><span>Invite code</span><strong>{groups.find((group) => String(group.id) === activeGroupId)?.invite_code || ""}</strong><span>Share this code with your group</span></div>
                 <div className="table-scroll"><table className="sessions-table"><thead><tr><th>RANK</th><th>MEMBER</th><th>STUDY TIME</th></tr></thead><tbody>
                   {(leaderboard?.leaderboard || []).map((member, index) => <tr key={member.user_id}><td>{index + 1}</td><td><strong>{member.name}</strong></td><td>{formatDuration(member.seconds)}</td></tr>)}
@@ -1163,13 +1260,11 @@ export default function App() {
                 </tbody></table></div>
               </section>
               <section className="panel page-panel winner-history">
-                <div className="panel-heading page-panel-heading"><div><h2>Date-round winners</h2><p>Each completed date block gets its own winner: 1–7, 8–14, 15–21, and 22–month-end.</p></div><Trophy size={20} /></div>
-                {roundWinners.length ? <div className="winner-list">{roundWinners.map((winner, index) => {
-                  const winCount = roundWinCounts[(winner.winner || "").trim().toLowerCase()] || 0;
-                  return <button type="button" className={`winner-row winner-row-clickable ${winCount > 1 ? "repeat-champion" : ""}`} key={winner.period_start} onClick={() => setSelectedRoundWinner(winner)} title={`Reveal ${winner.winner}'s winner card`}>
-                    <span className="winner-rank">{index + 1}</span><div><strong>{winner.winner}{winCount > 1 && <span className="repeat-crown" title={`${winCount} round wins`}><Crown size={14} /> {winCount}×</span>}</strong><span>{formatDate(winner.period_start)} – {formatDate(getDateRoundEnd(winner.period_start) || winner.period_end)}</span></div><b>{formatDuration(winner.seconds)}</b><Sparkles className="winner-sparkle-icon" size={17} />
-                  </button>;
-                })}</div> : <EmptyState icon={Trophy} title="First round winner is pending" description="The current round winner is saved after its date range closes." />}
+                <div className="panel-heading page-panel-heading"><div><h2>Date-round winners</h2><p>Each completed date block gets its own winner: 1–7, 8–14, 15–21, and 22–month-end. Select a winner to celebrate.</p></div><Trophy size={20} /></div>
+                {roundWinners.length ? <div className="winner-list">{roundWinners.map((winner, index) => <button type="button" className="winner-row winner-row-clickable" key={winner.period_start} onClick={() => setSelectedRoundWinner(winner)}>
+                  <span className="winner-rank">{index + 1}</span><span className="winner-row-name"><strong>{winner.winner}</strong><span>{formatDate(winner.period_start)} – {formatDate(winner.period_end)}</span></span><b>{formatDuration(winner.seconds)}</b><Sparkles className="winner-row-sparkle" size={17} />
+                </button>)}</div> : <EmptyState icon={Trophy} title="First round winner is pending" description="The current round winner is saved after its date range closes." />}
+                <div className="winner-notification-hint"><BellRing size={17} /><span>Every group member can see new winner announcements in the notification bell. Enable browser alerts to receive desktop notifications while StudyTrack is open.</span></div>
               </section>
               <section className="panel page-panel winner-history">
                 <div className="panel-heading page-panel-heading"><div><h2>Monthly champion</h2><p>The champion is decided from the full month’s group study time and saved after month-end.</p></div><Trophy size={20} /></div>
@@ -1187,22 +1282,52 @@ export default function App() {
             </>}
           </>}
 
-          {selectedRoundWinner && <div className="champion-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedRoundWinner(null); }}>
-            <section className="champion-card" role="dialog" aria-modal="true" aria-label={`${selectedRoundWinner.winner} is a date-round winner`}>
-              <div className="champion-sparkles" aria-hidden="true"><span>✦</span><span>✧</span><span>✦</span><span>✧</span></div>
-              <div className="champion-crown"><Crown size={43} /></div>
-              <div className="champion-kicker">DATE-ROUND CHAMPION</div>
-              <h2 className="champion-name">{selectedRoundWinner.winner}</h2>
-              <p className="champion-period">{formatDate(selectedRoundWinner.period_start)} – {formatDate(getDateRoundEnd(selectedRoundWinner.period_start) || selectedRoundWinner.period_end)}</p>
-              <div className="champion-time">{formatDuration(selectedRoundWinner.seconds)} of focused study</div>
-              {(roundWinCounts[(selectedRoundWinner.winner || "").trim().toLowerCase()] || 0) > 1 && <p style={{ marginTop: 16, color: "#9b6b17", fontWeight: 800 }}><Crown size={15} style={{ verticalAlign: "-3px" }} /> Returning champion · {roundWinCounts[(selectedRoundWinner.winner || "").trim().toLowerCase()]} round wins</p>}
-              <button type="button" className="primary-button champion-close" onClick={() => setSelectedRoundWinner(null)}>Awesome!</button>
-            </section>
-          </div>}
-
           <footer className="page-footer"><span>Made for focused learning.</span><span><span className="footer-dot" /> StudyTrack · {profile.name}'s workspace</span></footer>
         </div>
       </main>
+
+      {selectedRoundWinner && <div className="winner-celebration-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedRoundWinner(null); }}>
+        <section className="winner-celebration-card" role="dialog" aria-modal="true" aria-labelledby="winner-celebration-title">
+          <button type="button" className="winner-celebration-close" onClick={() => setSelectedRoundWinner(null)} aria-label="Close celebration"><X size={18} /></button>
+          <div className="celebration-confetti" aria-hidden="true">{Array.from({ length: 42 }, (_, index) => <i key={index} style={{ left: `${(index * 37) % 100}%`, animationDelay: `${(index % 14) * 0.075}s`, transform: `rotate(${index * 47}deg)` }} />)}</div>
+          <div className="winner-celebration-glow" />
+          <span className="winner-celebration-icon"><Trophy size={38} /></span>
+          <span className="winner-celebration-kicker"><PartyPopper size={16} /> DATE ROUND CHAMPION</span>
+          <h2 id="winner-celebration-title">Congratulations!</h2>
+          <p className="winner-celebration-name">{selectedRoundWinner.winner || "No activity"}</p>
+          <p className="winner-celebration-period">{formatDate(selectedRoundWinner.period_start)} – {formatDate(selectedRoundWinner.period_end)}</p>
+          <div className="winner-celebration-time"><span>Winning study time</span><strong>{formatDuration(selectedRoundWinner.seconds)}</strong></div>
+          <div className="winner-celebration-message"><Sparkles size={16} /> Consistency, focus, and effort deserve to be celebrated!</div>
+          <button type="button" className="primary-button winner-celebration-button" onClick={() => setSelectedRoundWinner(null)}>Awesome!</button>
+        </section>
+      </div>}
+
+      <style>{`
+        .notification-anchor{position:relative}
+        .notification-bell{position:relative}
+        .notification-bell.has-unread{color:#6d5ce7}
+        .notification-count{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:99px;background:#e45472;color:#fff;font-size:10px;font-weight:800;display:grid;place-items:center;border:2px solid var(--panel,#fff)}
+        .notification-panel{position:absolute;z-index:80;right:0;top:calc(100% + 12px);width:min(390px,calc(100vw - 28px));background:var(--panel,#fff);border:1px solid var(--border,#e9e7f1);border-radius:18px;box-shadow:0 22px 65px #21184a24;overflow:hidden;color:var(--text,#29263a)}
+        .notification-panel-heading{display:flex;align-items:center;justify-content:space-between;padding:17px 18px 12px;border-bottom:1px solid var(--border,#eeeaf5)}
+        .notification-panel-heading>div{display:grid;gap:3px}.notification-panel-heading strong{font-size:15px}.notification-panel-heading span{font-size:12px;color:var(--muted,#858197)}
+        .notification-settings-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--soft,#faf9fe);border-bottom:1px solid var(--border,#eeeaf5)}
+        .notification-settings-row .text-button{font-size:11px;gap:5px}.notification-permission{font-size:11px;color:var(--muted,#858197)}.notification-permission.enabled{color:#23845c;display:flex;align-items:center;gap:5px}
+        .notification-list{max-height:370px;overflow:auto}.notification-item{width:100%;display:flex;align-items:flex-start;gap:11px;padding:13px 15px;border:0;border-bottom:1px solid var(--border,#f0eef5);background:transparent;text-align:left;color:inherit;cursor:pointer}.notification-item:hover{background:var(--soft,#faf9fe)}.notification-item.unread{background:#f7f5ff}
+        .notification-item-icon{width:34px;height:34px;flex:0 0 34px;border-radius:11px;background:#eeeaff;color:#715ce5;display:grid;place-items:center}.notification-item-copy{display:grid;gap:4px;min-width:0;flex:1}.notification-item-copy strong{font-size:12px}.notification-item-copy span,.notification-item-copy small{font-size:11px;color:var(--muted,#858197);line-height:1.4}.notification-unread-dot{width:8px;height:8px;flex:0 0 8px;margin-top:6px;border-radius:50%;background:#755fe8}
+        .notification-empty{padding:30px 16px;display:grid;justify-items:center;gap:8px;color:var(--muted,#858197);text-align:center}.notification-empty strong{color:var(--text,#29263a);font-size:13px}.notification-empty span{font-size:12px}
+        .winner-row-clickable{width:100%;text-align:left;cursor:pointer;color:inherit;border:0;background:transparent;display:flex;align-items:center;gap:14px;transition:transform .18s ease,background .18s ease}.winner-row-clickable:hover{transform:translateY(-2px);background:var(--soft,#faf9fe)}.winner-row-name{display:grid;gap:4px;flex:1;min-width:0}.winner-row-name strong{font-size:14px}.winner-row-name span{font-size:12px;color:var(--muted,#858197)}.winner-row-sparkle{color:#8b72ed;flex:0 0 auto}.winner-notification-hint{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:13px 14px;border-radius:13px;background:#f6f4ff;color:#6255a4;font-size:12px;line-height:1.5}.winner-notification-hint svg{flex:0 0 auto;margin-top:1px}
+        .winner-celebration-backdrop{position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:20px;background:rgba(20,16,42,.72);backdrop-filter:blur(9px);animation:celebrationFadeIn .22s ease-out}
+        .winner-celebration-card{position:relative;isolation:isolate;overflow:hidden;width:min(470px,100%);padding:38px 30px 30px;border-radius:28px;background:linear-gradient(155deg,#211b49 0%,#33236b 55%,#4d3287 100%);color:#fff;text-align:center;box-shadow:0 28px 90px #08051b88;animation:championPop .55s cubic-bezier(.18,.85,.25,1.18) both}
+        .winner-celebration-close{position:absolute;z-index:5;right:14px;top:14px;width:34px;height:34px;border:1px solid #ffffff30;border-radius:50%;background:#ffffff12;color:#fff;display:grid;place-items:center;cursor:pointer}
+        .winner-celebration-glow{position:absolute;z-index:-1;width:260px;height:260px;left:50%;top:-135px;transform:translateX(-50%);border-radius:50%;background:#f3c85d38;filter:blur(28px);animation:glowPulse 2.2s ease-in-out infinite}
+        .winner-celebration-icon{width:82px;height:82px;margin:0 auto 17px;border-radius:26px;display:grid;place-items:center;color:#ffdb78;background:linear-gradient(145deg,#fff1bb25,#f0bd4b30);border:1px solid #ffdf8b70;box-shadow:0 0 45px #f3c85d36;animation:trophyFloat 2.4s ease-in-out infinite}
+        .winner-celebration-kicker{display:inline-flex;align-items:center;gap:7px;color:#f8d989;font-size:11px;font-weight:800;letter-spacing:2px}.winner-celebration-card h2{margin:13px 0 5px;font-size:27px;color:#fff}.winner-celebration-name{margin:0;font-size:30px;font-weight:850;letter-spacing:-.8px;color:#fff}.winner-celebration-period{margin:9px 0 20px;color:#d6ccef;font-size:13px}
+        .winner-celebration-time{display:grid;gap:6px;padding:15px;border-radius:17px;background:#ffffff12;border:1px solid #ffffff20}.winner-celebration-time span{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:#d8ccef}.winner-celebration-time strong{font-size:27px;color:#ffdf8c;font-variant-numeric:tabular-nums}.winner-celebration-message{display:flex;justify-content:center;align-items:center;gap:7px;margin:18px 0;color:#e7dcff;font-size:12px}.winner-celebration-message svg{color:#ffdb78}.winner-celebration-button{min-width:145px;justify-content:center;background:#f6d477!important;color:#2b214d!important;border:0!important;font-weight:800}
+        .celebration-confetti{position:absolute;inset:0;z-index:-1;overflow:hidden;pointer-events:none}.celebration-confetti i{position:absolute;top:-18px;width:8px;height:13px;border-radius:2px;background:#f6d477;animation:confettiFall 2.8s cubic-bezier(.2,.65,.3,1) infinite;opacity:0}.celebration-confetti i:nth-child(3n){background:#e58acb;width:6px;height:10px}.celebration-confetti i:nth-child(3n + 1){background:#8fe2d1;width:7px;height:12px}.celebration-confetti i:nth-child(4n){border-radius:50%;background:#fff1bb;width:6px;height:6px}
+        @keyframes celebrationFadeIn{from{opacity:0}to{opacity:1}}@keyframes championPop{0%{opacity:0;transform:translateY(24px) scale(.88)}100%{opacity:1;transform:translateY(0) scale(1)}}@keyframes trophyFloat{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-8px) rotate(3deg)}}@keyframes glowPulse{0%,100%{opacity:.55;transform:translateX(-50%) scale(.9)}50%{opacity:1;transform:translateX(-50%) scale(1.12)}}@keyframes confettiFall{0%{opacity:0;transform:translateY(-20px) rotate(0deg)}12%{opacity:1}100%{opacity:0;transform:translateY(470px) rotate(680deg)}}
+        @media(max-width:600px){.notification-panel{right:-52px}.winner-celebration-card{padding:34px 20px 24px}.winner-celebration-name{font-size:25px}.winner-row-clickable{gap:9px}.winner-row-clickable>b{font-size:12px}}
+        @media(prefers-reduced-motion:reduce){.winner-celebration-backdrop,.winner-celebration-card,.winner-celebration-icon,.winner-celebration-glow,.celebration-confetti i{animation:none!important}.winner-row-clickable{transition:none}}
+      `}</style>
 
       {showManualSessionForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowManualSessionForm(false); }}>
         <section className="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="manual-session-title">
