@@ -4,7 +4,7 @@ import {
   Activity, ArrowUpRight, BookOpen, Check,
   Clock3, Code2, FileText, Flame, FolderOpen,
   LayoutDashboard, LoaderCircle, LogOut, Plus, RefreshCw,
-  Search, Target, Trash2, Trophy, UserRound, Users, X,
+  Search, Target, Trash2, Trophy, UserRound, Users, X, Crown, Sparkles,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip,
@@ -23,43 +23,53 @@ function getTodayDate() {
   return `${year}-${month}-${day}`;
 }
 
-// Returns the next date-round boundary at 12:00 AM India Standard Time.
-// Round blocks are 1–7, 8–14, 15–21, and 22–month-end.
-function getNextISTRoundBoundaryTimestamp() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const year = Number(values.year);
-  const month = Number(values.month);
-  const day = Number(values.day);
+// Date-rounds are fixed calendar blocks: 1–7, 8–14, 15–21, 22–month-end.
+// Normalize the displayed end date from the start date so an inclusive
+// backend end-date mistake (for example 1–8) is never shown in the UI.
+function getDateRoundEnd(periodStart) {
+  if (!periodStart) return null;
+  const match = String(periodStart).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const startDay = Number(match[3]);
+  const lastDay = new Date(year, month, 0).getDate();
+  const endDay = startDay <= 1 ? 7 : startDay <= 8 ? 14 : startDay <= 15 ? 21 : lastDay;
+  return `${match[1]}-${match[2]}-${String(Math.min(endDay, lastDay)).padStart(2, "0")}`;
+}
 
+function getIndiaDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+}
+
+function getNextDateRoundBoundary() {
+  const { year, month, day } = getIndiaDateParts();
+  const boundaries = [1, 8, 15, 22];
+  let targetDay = boundaries.find((value) => value > day);
   let targetYear = year;
   let targetMonth = month;
-  let targetDay;
-
-  if (day < 8) targetDay = 8;
-  else if (day < 15) targetDay = 15;
-  else if (day < 22) targetDay = 22;
-  else {
+  if (!targetDay) {
     targetDay = 1;
     targetMonth += 1;
-    if (targetMonth > 12) {
-      targetMonth = 1;
-      targetYear += 1;
-    }
+    if (targetMonth > 12) { targetMonth = 1; targetYear += 1; }
   }
+  // IST is UTC+05:30. This creates the exact instant for midnight IST.
+  return new Date(Date.UTC(targetYear, targetMonth - 1, targetDay, 0, 0, 0) - (5.5 * 60 * 60 * 1000));
+}
 
-  // IST is UTC+05:30, so local midnight in IST is 18:30 UTC on the prior day.
-  return Date.UTC(targetYear, targetMonth - 1, targetDay, 0, 0, 0) - (5 * 60 + 30) * 60 * 1000;
+function getCurrentDateRound() {
+  const { year, month, day } = getIndiaDateParts();
+  const startDay = day <= 7 ? 1 : day <= 14 ? 8 : day <= 21 ? 15 : 22;
+  const lastDay = new Date(year, month, 0).getDate();
+  const endDay = startDay === 1 ? 7 : startDay === 8 ? 14 : startDay === 15 ? 21 : lastDay;
+  const monthText = String(month).padStart(2, "0");
+  return {
+    start: `${year}-${monthText}-${String(startDay).padStart(2, "0")}`,
+    end: `${year}-${monthText}-${String(Math.min(endDay, lastDay)).padStart(2, "0")}`,
+  };
 }
 
 function apiFetch(token, path, options = {}) {
@@ -421,6 +431,7 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState(null);
   const [winners, setWinners] = useState([]);
   const [roundWinners, setRoundWinners] = useState([]);
+  const [selectedRoundWinner, setSelectedRoundWinner] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -539,40 +550,29 @@ export default function App() {
     if (profile?.token) queueMicrotask(() => void loadDashboard());
   }, [profile?.token, activeGroupId, loadDashboard]);
 
-  // Refresh competition data at every date-round boundary (12:00 AM IST).
-  // The backend's GET /round-winners endpoint is responsible for saving any
-  // completed round before returning the winner history.
+  // Refresh competition standings exactly when a new date-round starts in IST
+  // (1st, 8th, 15th, or 22nd at 12:00 AM), and when the tab becomes visible.
   useEffect(() => {
-    if (!profile?.token || !activeGroupId) return undefined;
-
-    let timeoutId;
-    let disposed = false;
-
-    const scheduleNextBoundaryRefresh = () => {
-      if (disposed) return;
-      const delay = Math.max(1000, getNextISTRoundBoundaryTimestamp() - Date.now());
-      timeoutId = window.setTimeout(async () => {
-        await loadDashboard();
-        scheduleNextBoundaryRefresh();
+    if (!profile?.token) return undefined;
+    let timer;
+    const scheduleBoundaryRefresh = () => {
+      window.clearTimeout(timer);
+      const delay = Math.max(1000, getNextDateRoundBoundary().getTime() - Date.now() + 1200);
+      timer = window.setTimeout(() => {
+        void loadDashboard();
+        scheduleBoundaryRefresh();
       }, delay);
     };
-
-    const refreshWhenTabReturns = () => {
-      if (document.visibilityState !== "visible") return;
-      window.clearTimeout(timeoutId);
-      void loadDashboard();
-      scheduleNextBoundaryRefresh();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void loadDashboard();
     };
-
-    scheduleNextBoundaryRefresh();
-    document.addEventListener("visibilitychange", refreshWhenTabReturns);
-
+    scheduleBoundaryRefresh();
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
-      disposed = true;
-      window.clearTimeout(timeoutId);
-      document.removeEventListener("visibilitychange", refreshWhenTabReturns);
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [profile?.token, activeGroupId, loadDashboard]);
+  }, [profile?.token, loadDashboard]);
 
   useEffect(() => {
     if (!profile?.token) return;
@@ -617,6 +617,12 @@ export default function App() {
   const selectedTopicDomains = topics.find(
     (topic) => topic.name === noteForm.topic
   )?.domains || [];
+  const currentDateRound = getCurrentDateRound();
+  const roundWinCounts = roundWinners.reduce((counts, item) => {
+    const key = (item.winner || "").trim().toLowerCase();
+    if (key) counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
 
   async function submitTopic(event) {
     event.preventDefault();
@@ -906,7 +912,7 @@ export default function App() {
     sessions: ["Study sessions", "Review the time you've spent learning."],
     notes: ["My notes", "Keep your learning and ideas in one place."],
     topics: ["Your topics", "Organize your learning by subject."],
-    competition: ["Date-round competition", "Track four weekly rounds and your group’s monthly champion."],
+    competition: ["Date-round competition", "Track four date-based rounds (1–7, 8–14, 15–21, 22–month-end) and your group’s monthly champion."],
   };
   const [pageTitle, pageSubtitle] = pageTitles[activePage];
 
@@ -916,6 +922,33 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <style>{`
+        .winner-row-clickable { width: 100%; text-align: left; cursor: pointer; position: relative; transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; }
+        .winner-row-clickable:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(109, 83, 210, .14); border-color: #b8a8ff; }
+        .winner-row-clickable:focus-visible { outline: 3px solid #9b87ff; outline-offset: 3px; }
+        .winner-sparkle-icon { color: #a78bfa; opacity: .7; margin-left: 8px; }
+        .repeat-champion { background: linear-gradient(100deg, rgba(255, 244, 204, .7), rgba(255,255,255,.92)); }
+        .repeat-crown { display: inline-flex; align-items: center; gap: 3px; margin-left: 9px; color: #b7791f; font-size: 11px; font-weight: 800; vertical-align: middle; }
+        .champion-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(18, 14, 38, .72); backdrop-filter: blur(8px); animation: championFade .25s ease both; }
+        .champion-card { position: relative; overflow: hidden; width: min(100%, 460px); padding: 38px 28px 30px; border: 1px solid rgba(255,255,255,.65); border-radius: 28px; text-align: center; color: #30224f; background: radial-gradient(circle at 50% 0%, #fff8d8 0, #fff 48%, #f5f0ff 100%); box-shadow: 0 28px 90px rgba(0,0,0,.35); animation: championPop .55s cubic-bezier(.2,1.4,.4,1) both; }
+        .champion-crown { display: grid; place-items: center; width: 82px; height: 82px; margin: 0 auto 15px; color: #a66b00; border-radius: 50%; background: linear-gradient(145deg,#fff0a8,#ffd45e); box-shadow: 0 10px 30px #d69b343d; animation: crownFloat 2.5s ease-in-out infinite; }
+        .champion-kicker { color: #9b6b17; font-size: 11px; font-weight: 900; letter-spacing: .18em; }
+        .champion-name { margin: 10px 0 8px; font-size: clamp(28px, 7vw, 40px); line-height: 1.1; font-weight: 900; }
+        .champion-period { color: #776b91; font-size: 13px; }
+        .champion-time { display: inline-block; margin-top: 18px; padding: 10px 18px; border-radius: 999px; color: #5b43b5; background: #eee9ff; font-weight: 850; }
+        .champion-sparkles { position: absolute; inset: 0; pointer-events: none; }
+        .champion-sparkles span { position: absolute; color: #e0a51a; animation: sparkle 1.8s ease-in-out infinite; }
+        .champion-sparkles span:nth-child(1) { top: 15%; left: 12%; font-size: 25px; }
+        .champion-sparkles span:nth-child(2) { top: 22%; right: 13%; font-size: 31px; animation-delay: .3s; }
+        .champion-sparkles span:nth-child(3) { bottom: 25%; left: 8%; font-size: 20px; animation-delay: .6s; }
+        .champion-sparkles span:nth-child(4) { bottom: 20%; right: 9%; font-size: 26px; animation-delay: .9s; }
+        .champion-close { margin-top: 24px; }
+        @keyframes championFade { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes championPop { from { opacity: 0; transform: translateY(22px) scale(.82) } to { opacity: 1; transform: translateY(0) scale(1) } }
+        @keyframes crownFloat { 0%,100% { transform: translateY(0) rotate(-3deg) } 50% { transform: translateY(-7px) rotate(3deg) } }
+        @keyframes sparkle { 0%,100% { opacity: .35; transform: scale(.7) rotate(0) } 50% { opacity: 1; transform: scale(1.25) rotate(22deg) } }
+        @media (prefers-reduced-motion: reduce) { .winner-row-clickable, .champion-backdrop, .champion-card, .champion-crown, .champion-sparkles span { animation: none !important; transition: none !important; } }
+      `}</style>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><BookOpen size={23} /></div>
@@ -1122,7 +1155,7 @@ export default function App() {
               <div className="competition-actions"><button className="primary-button" onClick={() => setGroupDialog("create")}><Plus size={16} /> Create group</button><button className="secondary-button" onClick={() => setGroupDialog("join")}><Users size={16} /> Join group</button></div>
             </section> : <>
               <section className="panel page-panel">
-                <div className="panel-heading page-panel-heading"><div><span className="modal-kicker">DATE ROUND STANDINGS</span><h2>{groups.find((group) => String(group.id) === activeGroupId)?.name || "Group"}</h2><p>Current round: {formatDate(leaderboard?.period_start)} – {formatDate(leaderboard?.period_end)}</p><p>Monthly champion counts study time from {formatDate(leaderboard?.month_start)} to {formatDate(leaderboard?.month_end)}.</p></div><Trophy size={24} /></div>
+                <div className="panel-heading page-panel-heading"><div><span className="modal-kicker">DATE ROUND STANDINGS</span><h2>{groups.find((group) => String(group.id) === activeGroupId)?.name || "Group"}</h2><p>Current round: {formatDate(currentDateRound.start)} – {formatDate(currentDateRound.end)}</p><p>Monthly champion counts study time from {formatDate(leaderboard?.month_start)} to {formatDate(leaderboard?.month_end)}.</p></div><Trophy size={24} /></div>
                 <div className="invite-code-row"><span>Invite code</span><strong>{groups.find((group) => String(group.id) === activeGroupId)?.invite_code || ""}</strong><span>Share this code with your group</span></div>
                 <div className="table-scroll"><table className="sessions-table"><thead><tr><th>RANK</th><th>MEMBER</th><th>STUDY TIME</th></tr></thead><tbody>
                   {(leaderboard?.leaderboard || []).map((member, index) => <tr key={member.user_id}><td>{index + 1}</td><td><strong>{member.name}</strong></td><td>{formatDuration(member.seconds)}</td></tr>)}
@@ -1131,9 +1164,12 @@ export default function App() {
               </section>
               <section className="panel page-panel winner-history">
                 <div className="panel-heading page-panel-heading"><div><h2>Date-round winners</h2><p>Each completed date block gets its own winner: 1–7, 8–14, 15–21, and 22–month-end.</p></div><Trophy size={20} /></div>
-                {roundWinners.length ? <div className="winner-list">{roundWinners.map((winner, index) => <article className="winner-row" key={winner.period_start}>
-                  <span className="winner-rank">{index + 1}</span><div><strong>{winner.winner}</strong><span>{formatDate(winner.period_start)} – {formatDate(winner.period_end)}</span></div><b>{formatDuration(winner.seconds)}</b>
-                </article>)}</div> : <EmptyState icon={Trophy} title="First round winner is pending" description="The current round winner is saved after its date range closes." />}
+                {roundWinners.length ? <div className="winner-list">{roundWinners.map((winner, index) => {
+                  const winCount = roundWinCounts[(winner.winner || "").trim().toLowerCase()] || 0;
+                  return <button type="button" className={`winner-row winner-row-clickable ${winCount > 1 ? "repeat-champion" : ""}`} key={winner.period_start} onClick={() => setSelectedRoundWinner(winner)} title={`Reveal ${winner.winner}'s winner card`}>
+                    <span className="winner-rank">{index + 1}</span><div><strong>{winner.winner}{winCount > 1 && <span className="repeat-crown" title={`${winCount} round wins`}><Crown size={14} /> {winCount}×</span>}</strong><span>{formatDate(winner.period_start)} – {formatDate(getDateRoundEnd(winner.period_start) || winner.period_end)}</span></div><b>{formatDuration(winner.seconds)}</b><Sparkles className="winner-sparkle-icon" size={17} />
+                  </button>;
+                })}</div> : <EmptyState icon={Trophy} title="First round winner is pending" description="The current round winner is saved after its date range closes." />}
               </section>
               <section className="panel page-panel winner-history">
                 <div className="panel-heading page-panel-heading"><div><h2>Monthly champion</h2><p>The champion is decided from the full month’s group study time and saved after month-end.</p></div><Trophy size={20} /></div>
@@ -1150,6 +1186,19 @@ export default function App() {
               </section>
             </>}
           </>}
+
+          {selectedRoundWinner && <div className="champion-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedRoundWinner(null); }}>
+            <section className="champion-card" role="dialog" aria-modal="true" aria-label={`${selectedRoundWinner.winner} is a date-round winner`}>
+              <div className="champion-sparkles" aria-hidden="true"><span>✦</span><span>✧</span><span>✦</span><span>✧</span></div>
+              <div className="champion-crown"><Crown size={43} /></div>
+              <div className="champion-kicker">DATE-ROUND CHAMPION</div>
+              <h2 className="champion-name">{selectedRoundWinner.winner}</h2>
+              <p className="champion-period">{formatDate(selectedRoundWinner.period_start)} – {formatDate(getDateRoundEnd(selectedRoundWinner.period_start) || selectedRoundWinner.period_end)}</p>
+              <div className="champion-time">{formatDuration(selectedRoundWinner.seconds)} of focused study</div>
+              {(roundWinCounts[(selectedRoundWinner.winner || "").trim().toLowerCase()] || 0) > 1 && <p style={{ marginTop: 16, color: "#9b6b17", fontWeight: 800 }}><Crown size={15} style={{ verticalAlign: "-3px" }} /> Returning champion · {roundWinCounts[(selectedRoundWinner.winner || "").trim().toLowerCase()]} round wins</p>}
+              <button type="button" className="primary-button champion-close" onClick={() => setSelectedRoundWinner(null)}>Awesome!</button>
+            </section>
+          </div>}
 
           <footer className="page-footer"><span>Made for focused learning.</span><span><span className="footer-dot" /> StudyTrack · {profile.name}'s workspace</span></footer>
         </div>
