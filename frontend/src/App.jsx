@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useState } from "react";
 import {
   Activity, ArrowUpRight, Bell, BellRing, BookOpen, Check, CheckCheck,
@@ -27,7 +26,6 @@ function roundWinnerNotificationId(groupId, periodStart) {
   return `round-winner:${groupId}:${periodStart}`;
 }
 
-// Returns today's date in the browser's local timezone (YYYY-MM-DD).
 function getTodayDate() {
   const today = new Date();
   const year = today.getFullYear();
@@ -67,6 +65,18 @@ const navigation = [
   { id: "topics", label: "Topics", icon: FolderOpen },
   { id: "competition", label: "Competition", icon: Trophy },
 ];
+
+function getSavedPage(userId) {
+  if (!userId) return "overview";
+
+  const savedPage = localStorage.getItem(
+    `studytrack_active_page_${userId}`
+  );
+
+  return navigation.some((item) => item.id === savedPage)
+    ? savedPage
+    : "overview";
+}
 
 function formatDuration(seconds = 0) {
   const n = Math.floor(Math.max(0, Number(seconds) || 0));
@@ -383,7 +393,20 @@ export default function App() {
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState("");
 
-  const [activePage, setActivePage] = useState("overview");
+  // Restore the last selected page for the currently authenticated user.
+  const [activePage, setActivePage] = useState(() => {
+    let savedProfile = null;
+
+    try {
+      const saved = localStorage.getItem(AUTH_KEY);
+      savedProfile = saved ? JSON.parse(saved) : null;
+    } catch {
+      savedProfile = null;
+    }
+
+    return getSavedPage(savedProfile?.id);
+  });
+
   const [summary, setSummary] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -431,6 +454,32 @@ export default function App() {
   const [manualDomainName, setManualDomainName] = useState("");
   const [manualDomainError, setManualDomainError] = useState("");
 
+  // Keep the selected page synchronized when the account changes.
+  useEffect(() => {
+    if (!profile?.id) {
+      setActivePage("overview");
+      return;
+    }
+
+    setActivePage(getSavedPage(profile.id));
+  }, [profile?.id]);
+
+  // Use this for every in-app page navigation so the selection is persisted.
+  function navigateToPage(page) {
+    const isValidPage = navigation.some((item) => item.id === page);
+    if (!isValidPage) return;
+
+    setActivePage(page);
+    setSearch("");
+
+    if (profile?.id) {
+      localStorage.setItem(
+        `studytrack_active_page_${profile.id}`,
+        page
+      );
+    }
+  }
+
   const authenticate = async ({ mode, name, email, password }) => {
     setProfileBusy(true);
     setProfileError("");
@@ -473,6 +522,9 @@ export default function App() {
     setTopics([]);
     setGroups([]);
     setActiveGroupId("");
+    setNotifications([]);
+    setShowNotificationPanel(false);
+    setSelectedRoundWinner(null);
   };
 
   const loadDashboard = useCallback(async () => {
@@ -526,7 +578,6 @@ export default function App() {
       const previousNotifications = readLocalArray(notificationKey);
       const allFreshNotifications = [];
 
-      // Check every group the user belongs to, even while using Individual workspace.
       for (const group of groups) {
         const groupId = String(group.id);
         const response = await apiFetch(
@@ -543,7 +594,6 @@ export default function App() {
           .map((winner) => roundWinnerNotificationId(groupId, winner.period_start));
         const storedKnown = localStorage.getItem(knownKey);
 
-        // First visit establishes a baseline. Historical winners are not announced as new.
         if (storedKnown === null) {
           localStorage.setItem(knownKey, JSON.stringify(currentKeys));
           continue;
@@ -899,7 +949,6 @@ export default function App() {
       return;
     }
 
-    // Construct the selected local date/time, then send an ISO timestamp to the API.
     const startedAt = new Date(`${manualSession.date}T${manualSession.startTime}:00`);
     if (Number.isNaN(startedAt.getTime())) {
       setManualSessionError("Please enter a valid date and start time.");
@@ -994,7 +1043,7 @@ export default function App() {
 
   function openWinnerFromNotification(item) {
     markNotificationRead(item.id);
-    setActivePage("competition");
+    navigateToPage("competition");
     if (String(item.groupId) !== activeGroupId) changeWorkspace(String(item.groupId));
     setSelectedRoundWinner(item);
     setShowNotificationPanel(false);
@@ -1013,7 +1062,7 @@ export default function App() {
     topics: ["Your topics", "Organize your learning by subject."],
     competition: ["Date-round competition", "Track four weekly rounds and your group’s monthly champion."],
   };
-  const [pageTitle, pageSubtitle] = pageTitles[activePage];
+  const [pageTitle, pageSubtitle] = pageTitles[activePage] || pageTitles.overview;
   const unreadNotificationCount = notifications.filter((item) => !item.read).length;
 
   if (!profile?.token) {
@@ -1045,7 +1094,7 @@ export default function App() {
         <nav className="navigation" aria-label="Main navigation">
           {navigation.map(({ id, label, icon: Icon }) => (
             <button className={`nav-item ${activePage === id ? "active" : ""}`} key={id}
-              onClick={() => { setActivePage(id); setSearch(""); }}>
+              onClick={() => navigateToPage(id)}>
               <Icon size={19} /><span>{label}</span>
               {id === "notes" && notes.length > 0 && <span className="nav-count">{notes.length}</span>}
             </button>
@@ -1155,16 +1204,16 @@ export default function App() {
               </article>
             </section>
             <section className="panel recent-panel">
-              <div className="panel-heading"><div><h2>Recent study sessions</h2><p>A quick look at your latest learning activity</p></div><button className="text-button" onClick={() => setActivePage("sessions")}>View all <ArrowUpRight size={15} /></button></div>
+              <div className="panel-heading"><div><h2>Recent study sessions</h2><p>A quick look at your latest learning activity</p></div><button className="text-button" onClick={() => navigateToPage("sessions")}>View all <ArrowUpRight size={15} /></button></div>
               <SessionTable sessions={sessions.slice(0, 5)} loading={loading} />
             </section>
             <section className="bottom-grid">
               <article className="panel compact-panel">
-                <div className="panel-heading"><div><h2>Recently saved notes</h2><p>Ideas worth remembering</p></div><button className="text-button" onClick={() => setActivePage("notes")}>View all <ArrowUpRight size={15} /></button></div>
+                <div className="panel-heading"><div><h2>Recently saved notes</h2><p>Ideas worth remembering</p></div><button className="text-button" onClick={() => navigateToPage("notes")}>View all <ArrowUpRight size={15} /></button></div>
                 {notes.length === 0 ? <EmptyState icon={FileText} title="No notes yet" description="Save an idea and it'll show up here." /> : <div className="mini-list">{notes.slice(0, 3).map((note) => <div className="mini-item" key={note.id}><span className="mini-item-icon"><FileText size={17} /></span><div className="mini-item-content"><strong>{note.title}</strong><span>{note.topic || "General"} · {formatDate(note.updated_at)}</span></div></div>)}</div>}
               </article>
               <article className="panel compact-panel">
-                <div className="panel-heading"><div><h2>Your learning topics</h2><p>What you're working on</p></div><button className="text-button" onClick={() => setActivePage("topics")}>View all <ArrowUpRight size={15} /></button></div>
+                <div className="panel-heading"><div><h2>Your learning topics</h2><p>What you're working on</p></div><button className="text-button" onClick={() => navigateToPage("topics")}>View all <ArrowUpRight size={15} /></button></div>
                 {topics.length === 0 ? <EmptyState icon={FolderOpen} title="No topics yet" description="Create a topic to organize your notes." /> : <div className="topic-chips">{topics.slice(0, 8).map((topic, i) => <span className={`topic-chip topic-color-${i % 4}`} key={topic.id}><span />{topic.name}</span>)}</div>}
               </article>
             </section>
@@ -1364,11 +1413,11 @@ export default function App() {
             </select>
             {!manualSession.topic && <p className="form-hint">Select a topic first to choose or create its domain.</p>}
             {manualSession.topic && !showManualDomainForm && <button type="button" className="text-button manual-create-domain" onClick={() => { setManualDomainError(""); setShowManualDomainForm(true); }}><Plus size={15} /> Create domain</button>}
-            {showManualDomainForm && <form className="domain-form manual-domain-form" onSubmit={submitManualDomain}>
+            {showManualDomainForm && <div className="domain-form manual-domain-form">
               <input autoFocus required maxLength={100} value={manualDomainName} placeholder="Enter new domain name" onChange={(e) => setManualDomainName(e.target.value)} />
-              <button type="submit" className="primary-button" disabled={saving || !manualDomainName.trim()}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Add</button>
+              <button type="button" className="primary-button" disabled={saving || !manualDomainName.trim()} onClick={submitManualDomain}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Add</button>
               <button type="button" className="icon-button" disabled={saving} onClick={() => { setShowManualDomainForm(false); setManualDomainName(""); setManualDomainError(""); }} aria-label="Cancel creating domain"><X size={15} /></button>
-            </form>}
+            </div>}
             {manualDomainError && <div className="alert alert-error">{manualDomainError}</div>}
             <label htmlFor="manual-activity">What did you study? (optional)</label>
             <input id="manual-activity" maxLength={500} placeholder="e.g. Solved heap problems / watched a lecture" value={manualSession.activity} onChange={(e) => setManualSession({ ...manualSession, activity: e.target.value })} />
