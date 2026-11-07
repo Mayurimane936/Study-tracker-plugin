@@ -3,8 +3,9 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Activity, ArrowUpRight, BookOpen, Check,
   Clock3, Code2, FileText, Flame, FolderOpen,
-  LayoutDashboard, LoaderCircle, LogOut, Plus, RefreshCw,
-  Search, Target, Trash2, Trophy, UserRound, Users, X,
+  Highlighter, LayoutDashboard, LoaderCircle, LogOut,
+  Pencil, Plus, RefreshCw, Search, Target, Trash2,
+  Trophy, UserRound, Users, X,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip,
@@ -348,14 +349,44 @@ function AuthWelcome({ onAuthenticate, busy, error }) {
     </main>
   );
 }
+
 function getTodayDate() {
   const today = new Date();
   const year = today.getFullYear();
   const month = String(today.getMonth() + 1).padStart(2, "0");
   const day = String(today.getDate()).padStart(2, "0");
-
   return `${year}-${month}-${day}`;
 }
+
+/*
+ * Highlights are stored as selected text strings.
+ * The reader displays each saved phrase with a yellow background.
+ */
+function renderHighlightedContent(content, highlights) {
+  if (!content) return "No additional content.";
+
+  const phrases = [...new Set(highlights.filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+
+  if (!phrases.length) return content;
+
+  const escaped = phrases.map((phrase) =>
+    phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  );
+  const regex = new RegExp(`(${escaped.join("|")})`, "gi");
+  const parts = content.split(regex);
+
+  return parts.map((part, index) => {
+    const isHighlighted = phrases.some(
+      (phrase) => part.toLowerCase() === phrase.toLowerCase()
+    );
+
+    return isHighlighted
+      ? <mark key={index} className="studytrack-note-highlight">{part}</mark>
+      : <span key={index}>{part}</span>;
+  });
+}
+
 export default function App() {
   const [profile, setProfile] = useState(() => {
     try {
@@ -386,6 +417,8 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [showNoteForm, setShowNoteForm] = useState(false);
   const [noteReadOnly, setNoteReadOnly] = useState(false);
+  const [readerNote, setReaderNote] = useState(null);
+  const [readerHighlights, setReaderHighlights] = useState([]);
   const [showTopicForm, setShowTopicForm] = useState(false);
   const [groupDialog, setGroupDialog] = useState("");
   const [groupName, setGroupName] = useState("");
@@ -445,6 +478,7 @@ export default function App() {
     setTopics([]);
     setGroups([]);
     setActiveGroupId("");
+    setReaderNote(null);
   };
 
   const loadDashboard = useCallback(async () => {
@@ -659,7 +693,20 @@ export default function App() {
     setShowNoteForm(true);
   }
 
-  function openNotePage(note) {
+  // Open a note in the large reading view.
+  function openNoteReader(note) {
+    setReaderNote(note);
+
+    try {
+      const saved = localStorage.getItem(`studytrack_highlights_${note.id}`);
+      setReaderHighlights(saved ? JSON.parse(saved) : []);
+    } catch {
+      setReaderHighlights([]);
+    }
+  }
+
+  // The edit icon opens the existing editor.
+  function editNotePage(note) {
     setNoteForm({
       id: note.id,
       title: note.title,
@@ -669,6 +716,53 @@ export default function App() {
     });
     setNoteReadOnly(!note.can_edit);
     setShowNoteForm(true);
+    setReaderNote(null);
+  }
+
+  function addReaderHighlight() {
+    if (!readerNote) return;
+
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim();
+
+    if (!selectedText) {
+      setNotice("Select some text in the note first, then click Highlight selection.");
+      return;
+    }
+
+    setReaderHighlights((current) => {
+      if (current.some((item) => item.toLowerCase() === selectedText.toLowerCase())) {
+        setNotice("That text is already highlighted.");
+        return current;
+      }
+
+      const updated = [...current, selectedText];
+
+      try {
+        localStorage.setItem(
+          `studytrack_highlights_${readerNote.id}`,
+          JSON.stringify(updated)
+        );
+      } catch {
+        setError("Could not save this highlight in your browser.");
+      }
+
+      setNotice("Text highlighted.");
+      return updated;
+    });
+
+    selection.removeAllRanges();
+  }
+
+  function clearReaderHighlights() {
+    if (!readerNote) return;
+
+    const confirmed = window.confirm("Remove all highlights from this note?");
+    if (!confirmed) return;
+
+    localStorage.removeItem(`studytrack_highlights_${readerNote.id}`);
+    setReaderHighlights([]);
+    setNotice("Highlights cleared.");
   }
 
   async function deleteNotePage(note) {
@@ -678,6 +772,7 @@ export default function App() {
         method: "DELETE",
       });
       if (!response.ok) throw new Error("Couldn't delete this note page.");
+      localStorage.removeItem(`studytrack_highlights_${note.id}`);
       setNotice("Note page deleted.");
       await loadDashboard();
     } catch (err) {
@@ -707,7 +802,6 @@ export default function App() {
       return;
     }
 
-    // Construct the selected local date/time, then send an ISO timestamp to the API.
     const startedAt = new Date(`${manualSession.date}T${manualSession.startTime}:00`);
     if (Number.isNaN(startedAt.getTime())) {
       setManualSessionError("Please enter a valid date and start time.");
@@ -781,6 +875,7 @@ export default function App() {
     setActiveGroupId(nextGroupId);
     if (nextGroupId) localStorage.setItem("studytrack_workspace", nextGroupId);
     else localStorage.removeItem("studytrack_workspace");
+    setReaderNote(null);
   }
 
   const pageTitles = {
@@ -821,7 +916,7 @@ export default function App() {
         <nav className="navigation" aria-label="Main navigation">
           {navigation.map(({ id, label, icon: Icon }) => (
             <button className={`nav-item ${activePage === id ? "active" : ""}`} key={id}
-              onClick={() => { setActivePage(id); setSearch(""); }}>
+              onClick={() => { setActivePage(id); setSearch(""); setReaderNote(null); }}>
               <Icon size={19} /><span>{label}</span>
               {id === "notes" && notes.length > 0 && <span className="nav-count">{notes.length}</span>}
             </button>
@@ -935,7 +1030,7 @@ export default function App() {
           </section>}
 
           {activePage === "notes" && <section className="panel page-panel">
-            <div className="panel-heading page-panel-heading"><div><h2>Topic notebooks</h2><p>Each note is a separate page inside its topic and domain.</p></div><button className="primary-button" onClick={() => startNotePage()}><Plus size={17} /> New page</button></div>
+            <div className="panel-heading page-panel-heading"><div><h2>Topic notebooks</h2><p>Open a note to read it. Use the pencil icon when you want to edit.</p></div><button className="primary-button" onClick={() => startNotePage()}><Plus size={17} /> New page</button></div>
             <SearchBox value={search} onChange={setSearch} />
             {filteredNotes.length === 0 ? <EmptyState icon={FileText} title="No note pages yet" description="Create a page inside a topic to start a notebook." /> : <div className="note-topic-groups">
               {topics.map((topic) => {
@@ -946,11 +1041,17 @@ export default function App() {
                   <div className="notes-grid">{pages.map((note) => <article className="note-card" key={note.id}>
                     <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
                     <button className="note-page-open"
-                      title={note.can_edit ? "Open note page" : "View shared note page"}
-                      onClick={() => openNotePage(note)}>
+                      title="Read note page"
+                      onClick={() => openNoteReader(note)}>
                       <h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p>
                     </button>
-                    <div className="note-card-footer"><span className="note-topic">{note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
+                    <div className="note-card-footer">
+                      <span className="note-topic">{note.domain || "General"}</span>
+                      <div className="note-card-actions">
+                        {note.can_edit && <button className="note-edit" onClick={() => editNotePage(note)} aria-label={`Edit ${note.title}`} title="Edit page"><Pencil size={15} /></button>}
+                        {note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}
+                      </div>
+                    </div>
                   </article>)}</div>
                 </section>;
               })}
@@ -959,9 +1060,17 @@ export default function App() {
                 <div className="notes-grid">{filteredNotes.filter((note) => !topics.some((topic) => topic.name === note.topic)).map((note) => <article className="note-card" key={note.id}>
                   <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
                   <button className="note-page-open"
-                    title={note.can_edit ? "Open note page" : "View shared note page"}
-                    onClick={() => openNotePage(note)}><h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p></button>
-                  <div className="note-card-footer"><span className="note-topic">{note.topic || "General"} · {note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
+                    title="Read note page"
+                    onClick={() => openNoteReader(note)}>
+                    <h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p>
+                  </button>
+                  <div className="note-card-footer">
+                    <span className="note-topic">{note.topic || "General"} · {note.domain || "General"}</span>
+                    <div className="note-card-actions">
+                      {note.can_edit && <button className="note-edit" onClick={() => editNotePage(note)} aria-label={`Edit ${note.title}`} title="Edit page"><Pencil size={15} /></button>}
+                      {note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}
+                    </div>
+                  </div>
                 </article>)}</div>
               </section>}
             </div>}
@@ -1059,7 +1168,6 @@ export default function App() {
             <div className="manual-session-grid">
               <div>
                 <label htmlFor="manual-date">Study date</label>
-
                 <input
                   id="manual-date"
                   type="date"
@@ -1098,7 +1206,7 @@ export default function App() {
         </section>
       </div>}
 
-      {showNoteForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowNoteForm(false); }}>
+      {showNoteForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowNoteForm(false); }}>
         <section className="modal" role="dialog" aria-modal="true">
           <div className="modal-header"><div><span className="modal-kicker">TOPIC NOTEBOOK</span><h2>{noteReadOnly ? "View note page" : noteForm.id ? "Edit note page" : "Create a note page"}</h2><p>{noteReadOnly ? "Shared with everyone in this group." : "Save a separate page inside a topic and domain."}</p></div><button className="icon-button" onClick={() => setShowNoteForm(false)} aria-label="Close"><X size={18} /></button></div>
           <form onSubmit={submitNote} className="modal-form">
@@ -1111,6 +1219,87 @@ export default function App() {
         </section>
       </div>}
 
+      {/* Large reading page for notes */}
+      {readerNote && <div
+        className="modal-backdrop note-reader-backdrop"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setReaderNote(null);
+        }}
+      >
+        <section
+          className="note-reader-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="note-reader-title"
+        >
+          <header className="note-reader-header">
+            <div className="note-reader-heading">
+              <span className="modal-kicker">STUDYTRACK NOTEBOOK</span>
+              <h2 id="note-reader-title">{readerNote.title}</h2>
+              <p>
+                {readerNote.topic || "General"} · {readerNote.domain || "General"}
+                {" · "}Updated {formatDate(readerNote.updated_at)}
+              </p>
+            </div>
+            <div className="note-reader-header-actions">
+              {readerNote.can_edit && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => editNotePage(readerNote)}
+                >
+                  <Pencil size={16} /> Edit
+                </button>
+              )}
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setReaderNote(null)}
+                aria-label="Close reading page"
+                title="Close"
+              >
+                <X size={19} />
+              </button>
+            </div>
+          </header>
+
+          <div className="note-reader-toolbar">
+            <div className="note-reader-toolbar-info">
+              <Highlighter size={17} />
+              <span>Select text in the note, then highlight it.</span>
+            </div>
+            <div className="note-reader-toolbar-actions">
+              <button
+                type="button"
+                className="primary-button"
+                onClick={addReaderHighlight}
+              >
+                <Highlighter size={16} /> Highlight selection
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={clearReaderHighlights}
+                disabled={readerHighlights.length === 0}
+              >
+                Clear highlights
+              </button>
+            </div>
+          </div>
+
+          <article className="note-reader-content">
+            {renderHighlightedContent(readerNote.content || "", readerHighlights)}
+          </article>
+
+          <footer className="note-reader-footer">
+            <span>
+              {readerHighlights.length} saved highlight{readerHighlights.length === 1 ? "" : "s"}
+            </span>
+            <span>Tip: drag over any sentence to select it.</span>
+          </footer>
+        </section>
+      </div>}
+
       {showTopicForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowTopicForm(false); }}>
         <section className="modal modal-small" role="dialog" aria-modal="true">
           <div className="modal-header"><div><span className="modal-kicker">ORGANIZE YOUR LEARNING</span><h2>Create a topic</h2><p>Give your next learning goal a name.</p></div><button className="icon-button" onClick={() => setShowTopicForm(false)} aria-label="Close"><X size={18} /></button></div>
@@ -1120,6 +1309,187 @@ export default function App() {
           </form>
         </section>
       </div>}
+
+      {/* Styles for the new reading experience */}
+      <style>{`
+        .note-card-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .note-edit,
+        .note-delete {
+          display: inline-grid;
+          place-items: center;
+          width: 32px;
+          height: 32px;
+          border: 1px solid var(--border, #e9e7f0);
+          border-radius: 9px;
+          background: #fff;
+          color: #77738b;
+          cursor: pointer;
+          transition: background .18s ease, color .18s ease, border-color .18s ease;
+        }
+
+        .note-edit:hover {
+          color: #6955d9;
+          background: #f3f0ff;
+          border-color: #dcd5ff;
+        }
+
+        .note-delete:hover {
+          color: #d84d5b;
+          background: #fff1f2;
+          border-color: #ffd5d9;
+        }
+
+        .note-reader-backdrop {
+          z-index: 1200;
+          padding: 24px;
+          overflow-y: auto;
+          align-items: center;
+        }
+
+        .note-reader-modal {
+          width: min(100%, 1000px);
+          height: min(90vh, 900px);
+          min-height: 500px;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          background: #fff;
+          border-radius: 20px;
+          box-shadow: 0 24px 80px rgba(26, 20, 65, .22);
+        }
+
+        .note-reader-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 20px;
+          padding: 28px 34px 22px;
+          border-bottom: 1px solid #efedf5;
+        }
+
+        .note-reader-heading {
+          min-width: 0;
+        }
+
+        .note-reader-heading h2 {
+          margin: 8px 0 6px;
+          color: #26233a;
+          font-size: clamp(22px, 3vw, 30px);
+          line-height: 1.3;
+          overflow-wrap: anywhere;
+        }
+
+        .note-reader-heading p {
+          margin: 0;
+          color: #858197;
+          font-size: 13px;
+        }
+
+        .note-reader-header-actions,
+        .note-reader-toolbar-actions {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          flex-shrink: 0;
+        }
+
+        .note-reader-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          padding: 14px 34px;
+          background: #faf9fe;
+          border-bottom: 1px solid #efedf5;
+        }
+
+        .note-reader-toolbar-info {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          color: #77718f;
+          font-size: 13px;
+        }
+
+        .note-reader-content {
+          flex: 1;
+          overflow-y: auto;
+          padding: 38px clamp(24px, 7vw, 82px);
+          color: #383548;
+          font-size: 17px;
+          line-height: 2;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          user-select: text;
+          cursor: text;
+        }
+
+        .studytrack-note-highlight {
+          padding: 2px 3px;
+          color: #493b12;
+          background: #fff0a6;
+          border-radius: 4px;
+          box-decoration-break: clone;
+          -webkit-box-decoration-break: clone;
+        }
+
+        .note-reader-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 14px 34px;
+          color: #918da0;
+          font-size: 12px;
+          background: #fcfbfe;
+          border-top: 1px solid #efedf5;
+        }
+
+        @media (max-width: 700px) {
+          .note-reader-backdrop {
+            padding: 10px;
+            align-items: stretch;
+          }
+
+          .note-reader-modal {
+            width: 100%;
+            height: 100%;
+            min-height: 0;
+            border-radius: 14px;
+          }
+
+          .note-reader-header {
+            padding: 20px 18px 16px;
+          }
+
+          .note-reader-toolbar {
+            align-items: flex-start;
+            flex-direction: column;
+            padding: 13px 18px;
+          }
+
+          .note-reader-toolbar-actions {
+            width: 100%;
+            flex-wrap: wrap;
+          }
+
+          .note-reader-content {
+            padding: 25px 20px;
+            font-size: 16px;
+            line-height: 1.9;
+          }
+
+          .note-reader-footer {
+            padding: 12px 18px;
+            flex-wrap: wrap;
+          }
+        }
+      `}</style>
     </div>
   );
 }
