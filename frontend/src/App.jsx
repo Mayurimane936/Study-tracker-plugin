@@ -134,11 +134,11 @@ function StreakCalendar({ days = [], streak = 0 }) {
           {cells.map((day) => day.blank
             ? <span className="streak-cell streak-cell-blank" key={day.key} aria-hidden="true" />
             : <span
-                className={`streak-cell level-${level(day.seconds)}`}
-                key={day.key}
-                title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
-                aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
-              />)}
+              className={`streak-cell level-${level(day.seconds)}`}
+              key={day.key}
+              title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
+              aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
+            />)}
         </div>
       </div>
     </section>
@@ -348,7 +348,14 @@ function AuthWelcome({ onAuthenticate, busy, error }) {
     </main>
   );
 }
+function getTodayDate() {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
 
+  return `${year}-${month}-${day}`;
+}
 export default function App() {
   const [profile, setProfile] = useState(() => {
     try {
@@ -389,6 +396,12 @@ export default function App() {
     id: null, title: "", content: "", topic: "", domain: "",
   });
   const [topicName, setTopicName] = useState("");
+  const [showManualSessionForm, setShowManualSessionForm] = useState(false);
+  const [manualSession, setManualSession] = useState({
+    topic: "", domain: "", activity: "", date: new Date().toLocaleDateString("en-CA"),
+    startTime: "09:00", hours: "0", minutes: "30",
+  });
+  const [manualSessionError, setManualSessionError] = useState("");
 
   const authenticate = async ({ mode, name, email, password }) => {
     setProfileBusy(true);
@@ -672,6 +685,81 @@ export default function App() {
     }
   }
 
+  async function submitManualSession(event) {
+    event.preventDefault();
+    setManualSessionError("");
+    setError("");
+    setNotice("");
+
+    const hours = Number(manualSession.hours);
+    const minutes = Number(manualSession.minutes);
+    const durationSeconds = (hours * 3600) + (minutes * 60);
+    if (!manualSession.date || !manualSession.startTime) {
+      setManualSessionError("Please choose the study date and start time.");
+      return;
+    }
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || minutes < 0 || minutes > 59) {
+      setManualSessionError("Enter valid hours and minutes (minutes must be 0–59).");
+      return;
+    }
+    if (durationSeconds <= 0 || durationSeconds > 86400) {
+      setManualSessionError("Study duration must be between 1 minute and 24 hours.");
+      return;
+    }
+
+    // Construct the selected local date/time, then send an ISO timestamp to the API.
+    const startedAt = new Date(`${manualSession.date}T${manualSession.startTime}:00`);
+    if (Number.isNaN(startedAt.getTime())) {
+      setManualSessionError("Please enter a valid date and start time.");
+      return;
+    }
+    const endedAt = new Date(startedAt.getTime() + durationSeconds * 1000);
+    if (endedAt.getTime() > Date.now()) {
+      setManualSessionError("The study session cannot end in the future. Check the date, start time and duration.");
+      return;
+    }
+    const todayDate = getTodayDate();
+
+    if (manualSession.date !== todayDate) {
+      setManualSessionError(
+        "Manual study time can only be added for today. Past and future dates aren't allowed."
+      );
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await apiFetch(profile.token, "/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          topic: manualSession.topic.trim() || "General",
+          domain: manualSession.domain.trim() || null,
+          duration_seconds: durationSeconds,
+          started_at: startedAt.toISOString(),
+          ended_at: endedAt.toISOString(),
+          site_url: null,
+          site_title: manualSession.activity.trim() || "Manual study session",
+          group_id: activeGroupId ? Number(activeGroupId) : null,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(result.detail, "Couldn't save this study session."));
+      }
+      setShowManualSessionForm(false);
+      setManualSession({
+        topic: "", domain: "", activity: "", date: new Date().toLocaleDateString("en-CA"),
+        startTime: "09:00", hours: "0", minutes: "30",
+      });
+      setNotice("Manual study time saved successfully.");
+      await loadDashboard();
+    } catch (err) {
+      setManualSessionError(err.message || "Couldn't save this study session.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function cleanupOldSessions() {
     if (!window.confirm("Delete your study sessions older than 90 days? Notes and monthly winners will be kept.")) return;
     try {
@@ -700,7 +788,7 @@ export default function App() {
     sessions: ["Study sessions", "Review the time you've spent learning."],
     notes: ["My notes", "Keep your learning and ideas in one place."],
     topics: ["Your topics", "Organize your learning by subject."],
-    competition: ["Date-round competition", "Track 1–8 day rounds and your group’s monthly champion."],
+    competition: ["Date-round competition", "Track four weekly rounds and your group’s monthly champion."],
   };
   const [pageTitle, pageSubtitle] = pageTitles[activePage];
 
@@ -837,7 +925,10 @@ export default function App() {
           {activePage === "sessions" && <section className="panel page-panel">
             <div className="panel-heading page-panel-heading">
               <div><h2>All study sessions</h2><p>{sessions.length} sessions recorded in this workspace · records older than 90 days are removed automatically; notes are kept</p></div>
-              <button className="secondary-button" onClick={cleanupOldSessions}><Trash2 size={16} /> Clean up now</button>
+              <div className="session-header-actions">
+                <button className="primary-button" onClick={() => { setManualSessionError(""); setShowManualSessionForm(true); }}><Plus size={16} /> Add study time</button>
+                <button className="secondary-button" onClick={cleanupOldSessions}><Trash2 size={16} /> Clean up now</button>
+              </div>
             </div>
             <SearchBox value={search} onChange={setSearch} />
             <GroupedSessions sessions={filteredSessions} loading={loading} />
@@ -921,7 +1012,7 @@ export default function App() {
                 </tbody></table></div>
               </section>
               <section className="panel page-panel winner-history">
-                <div className="panel-heading page-panel-heading"><div><h2>Date-round winners</h2><p>Each completed date block gets its own winner: 1–8, 9–16, 17–24, and 25–month-end.</p></div><Trophy size={20} /></div>
+                <div className="panel-heading page-panel-heading"><div><h2>Date-round winners</h2><p>Each completed date block gets its own winner: 1–7, 8–14, 15–21, and 22–month-end.</p></div><Trophy size={20} /></div>
                 {roundWinners.length ? <div className="winner-list">{roundWinners.map((winner, index) => <article className="winner-row" key={winner.period_start}>
                   <span className="winner-rank">{index + 1}</span><div><strong>{winner.winner}</strong><span>{formatDate(winner.period_start)} – {formatDate(winner.period_end)}</span></div><b>{formatDuration(winner.seconds)}</b>
                 </article>)}</div> : <EmptyState icon={Trophy} title="First round winner is pending" description="The current round winner is saved after its date range closes." />}
@@ -945,6 +1036,57 @@ export default function App() {
           <footer className="page-footer"><span>Made for focused learning.</span><span><span className="footer-dot" /> StudyTrack · {profile.name}'s workspace</span></footer>
         </div>
       </main>
+
+      {showManualSessionForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowManualSessionForm(false); }}>
+        <section className="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="manual-session-title">
+          <div className="modal-header">
+            <div><span className="modal-kicker">MANUAL STUDY LOG</span><h2 id="manual-session-title">Add study time</h2><p>Record learning you did away from tracked browser websites.</p></div>
+            <button className="icon-button" onClick={() => !saving && setShowManualSessionForm(false)} aria-label="Close" disabled={saving}><X size={18} /></button>
+          </div>
+          <form onSubmit={submitManualSession} className="modal-form">
+            <label htmlFor="manual-topic">Topic</label>
+            <select id="manual-topic" value={manualSession.topic} onChange={(e) => setManualSession({ ...manualSession, topic: e.target.value, domain: "" })}>
+              <option value="">General</option>
+              {topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}
+            </select>
+            <label htmlFor="manual-domain">Domain</label>
+            <select id="manual-domain" value={manualSession.domain} onChange={(e) => setManualSession({ ...manualSession, domain: e.target.value })}>
+              <option value="">General</option>
+              {(topics.find((topic) => topic.name === manualSession.topic)?.domains || []).map((domain) => <option key={domain.id} value={domain.name}>{domain.name}</option>)}
+            </select>
+            <label htmlFor="manual-activity">What did you study? (optional)</label>
+            <input id="manual-activity" maxLength={500} placeholder="e.g. Solved heap problems / watched a lecture" value={manualSession.activity} onChange={(e) => setManualSession({ ...manualSession, activity: e.target.value })} />
+            <div className="manual-session-grid">
+              <div>
+                <label htmlFor="manual-date">Study date</label>
+
+                <input
+                  id="manual-date"
+                  type="date"
+                  min={getTodayDate()}
+                  max={getTodayDate()}
+                  required
+                  value={manualSession.date}
+                  onChange={(e) =>
+                    setManualSession({
+                      ...manualSession,
+                      date: e.target.value,
+                    })
+                  }
+                />
+              </div>
+              <div><label htmlFor="manual-start">Start time</label><input id="manual-start" type="time" required value={manualSession.startTime} onChange={(e) => setManualSession({ ...manualSession, startTime: e.target.value })} /></div>
+            </div>
+            <label>Duration</label>
+            <div className="manual-session-grid duration-grid">
+              <div><label htmlFor="manual-hours">Hours</label><input id="manual-hours" type="number" min="0" max="24" step="1" required value={manualSession.hours} onChange={(e) => setManualSession({ ...manualSession, hours: e.target.value })} /></div>
+              <div><label htmlFor="manual-minutes">Minutes</label><input id="manual-minutes" type="number" min="0" max="59" step="1" required value={manualSession.minutes} onChange={(e) => setManualSession({ ...manualSession, minutes: e.target.value })} /></div>
+            </div>
+            {manualSessionError && <div className="alert alert-error">{manualSessionError}</div>}
+            <div className="modal-actions"><button type="button" className="secondary-button" disabled={saving} onClick={() => setShowManualSessionForm(false)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <Clock3 size={17} />} Save study time</button></div>
+          </form>
+        </section>
+      </div>}
 
       {groupDialog && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setGroupDialog(""); }}>
         <section className="modal modal-small" role="dialog" aria-modal="true">
