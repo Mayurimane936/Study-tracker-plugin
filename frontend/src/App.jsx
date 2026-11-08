@@ -63,36 +63,32 @@ function apiErrorMessage(detail, fallback) {
 // Allow only simple formatting tags in saved note content. This keeps rich-text
 // highlights while preventing scripts, event handlers, and unsafe attributes.
 function sanitizeNoteHtml(value = "") {
-  const template = document.createElement("template");
-  template.innerHTML = String(value ?? "");
-  const root = template.content;
-  const allowedTags = new Set(["B", "STRONG", "I", "EM", "U", "MARK", "BR", "P", "DIV", "UL", "OL", "LI"]);
+  // Keep note formatting without touching the live DOM during React render.
+  // DOM-based sanitizers can fail in some deployed/browser environments and
+  // were the source of the null innerHTML crash.
+  let html = String(value ?? "");
 
-  function clean(node) {
-    for (const child of [...node.childNodes]) {
-      if (child.nodeType === Node.TEXT_NODE) continue;
-      if (child.nodeType !== Node.ELEMENT_NODE) {
-        child.remove();
-        continue;
-      }
-      // Convert background-colored spans into semantic highlight elements.
-      if (child.tagName === "SPAN" && child.style.backgroundColor) {
-        const mark = document.createElement("mark");
-        mark.append(...child.childNodes);
-        child.replaceWith(mark);
-        continue;
-      }
-      clean(child);
-      if (!allowedTags.has(child.tagName)) {
-        child.replaceWith(...child.childNodes);
-      } else {
-        [...child.attributes].forEach((attribute) => child.removeAttribute(attribute.name));
-      }
-    }
-  }
+  // Remove executable/embedded content completely, including its contents.
+  html = html.replace(/<(script|style|iframe|object|embed|svg|math|form)[\s\S]*?<\/\1\s*>/gi, "");
+  html = html.replace(/<(script|style|iframe|object|embed|svg|math|form)\b[^>]*\/?\s*>/gi, "");
 
-  clean(root);
-  return template.innerHTML;
+  // Preserve the yellow highlights produced by StudyTrack, but discard all
+  // other span styling and attributes.
+  html = html.replace(/<span\b([^>]*)>([\s\S]*?)<\/span\s*>/gi, (_match, attrs, content) => {
+    const hasHighlight = /background(?:-color)?\s*:\s*(?:#fff2a8|yellow|rgb\(255\s*,\s*242\s*,\s*168\s*\))/i.test(attrs);
+    return hasHighlight ? `<mark>${content}</mark>` : content;
+  });
+
+  const allowed = new Set(["b", "strong", "i", "em", "u", "mark", "br", "p", "div", "ul", "ol", "li"]);
+  html = html.replace(/<\/?([a-z][a-z0-9]*)\b[^>]*>/gi, (tag, rawName) => {
+    const name = rawName.toLowerCase();
+    if (!allowed.has(name)) return "";
+    return /^<\s*\//.test(tag) ? `</${name}>` : `<${name}>`;
+  });
+
+  // Remove any remaining event-handler or javascript URL fragments that may
+  // have been present in malformed input. Allowed tags are emitted attribute-free.
+  return html;
 }
 
 const navigation = [
