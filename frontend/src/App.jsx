@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity, ArrowUpRight, Bell, BellRing, BookOpen, Check, CheckCheck,
   Clock3, Code2, FileText, Flame, FolderOpen,
@@ -1024,18 +1024,62 @@ export default function App() {
     setShowNoteForm(true);
   }
 
+  const noteSelectionRangeRef = useRef(null);
+
+  function rememberNoteSelection(event) {
+    // Keep the editor selection when the toolbar receives the mouse click.
+    // Preventing the default mousedown also stops the button from stealing focus.
+    event.preventDefault();
+    const editor = document.getElementById("note-content-editor");
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      noteSelectionRangeRef.current = null;
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const container = range.commonAncestorContainer;
+    if (editor.contains(container.nodeType === Node.ELEMENT_NODE ? container : container.parentNode)) {
+      noteSelectionRangeRef.current = range.cloneRange();
+    } else {
+      noteSelectionRangeRef.current = null;
+    }
+  }
+
   function highlightSelectedNoteText() {
     const editor = document.getElementById("note-content-editor");
-    if (!editor) return;
-    editor.focus();
-    let applied = false;
-    try {
-      applied = document.execCommand("hiliteColor", false, "#fff2a8");
-      if (!applied) document.execCommand("backColor", false, "#fff2a8");
-    } catch {
-      // Older browsers may not support the formatting command.
+    const savedRange = noteSelectionRangeRef.current;
+    if (!editor || !savedRange || savedRange.collapsed) {
+      setNotice("Select the text inside your note first, then click Highlight.");
+      return;
     }
-    setNoteForm((current) => ({ ...current, content: sanitizeNoteHtml(editor.innerHTML) }));
+
+    const container = savedRange.commonAncestorContainer;
+    if (!editor.contains(container.nodeType === Node.ELEMENT_NODE ? container : container.parentNode)) {
+      noteSelectionRangeRef.current = null;
+      setNotice("Please select text inside the note editor, then click Highlight.");
+      return;
+    }
+
+    try {
+      const mark = document.createElement("mark");
+      mark.style.backgroundColor = "#fff2a8";
+      mark.appendChild(savedRange.extractContents());
+      savedRange.insertNode(mark);
+
+      // Restore a useful selection around the highlighted text and persist clean HTML.
+      const selection = window.getSelection();
+      const highlightedRange = document.createRange();
+      highlightedRange.selectNodeContents(mark);
+      selection.removeAllRanges();
+      selection.addRange(highlightedRange);
+      editor.focus();
+      const content = sanitizeNoteHtml(editor.innerHTML);
+      setNoteForm((current) => ({ ...current, content }));
+      noteSelectionRangeRef.current = highlightedRange.cloneRange();
+    } catch (error) {
+      console.error("Unable to highlight selected note text:", error);
+      setNotice("Couldn't highlight that selection. Please select the text again and retry.");
+    }
   }
 
   async function deleteNotePage(note) {
@@ -1758,7 +1802,7 @@ export default function App() {
                 onClick={() => setNoteReadOnly(false)}><Pencil size={15} /> Edit</button>}
               {noteCanEdit && <button type="button" className="note-highlight-button"
                 title={noteReadOnly ? "Enable editing to highlight selected text" : "Highlight selected text in yellow"}
-                onMouseDown={(event) => event.preventDefault()}
+                onMouseDown={rememberNoteSelection}
                 onClick={() => {
                   if (noteReadOnly) {
                     setNoteReadOnly(false);
