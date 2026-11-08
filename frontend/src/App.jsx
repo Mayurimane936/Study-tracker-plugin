@@ -474,6 +474,7 @@ export default function App() {
   const [showNoteForm, setShowNoteForm] = useState(false);
   const [noteReadOnly, setNoteReadOnly] = useState(false);
   const [noteCanEdit, setNoteCanEdit] = useState(false);
+  const [pendingNoteHighlight, setPendingNoteHighlight] = useState(false);
   const [showTopicForm, setShowTopicForm] = useState(false);
   const [groupDialog, setGroupDialog] = useState("");
   const [groupName, setGroupName] = useState("");
@@ -1044,6 +1045,14 @@ export default function App() {
       noteSelectionRangeRef.current = null;
     }
   }
+
+  useEffect(() => {
+    if (!pendingNoteHighlight || noteReadOnly) return;
+    setPendingNoteHighlight(false);
+    // Wait until the editor has switched to editable mode, then apply the
+    // selection captured by the toolbar's mousedown handler.
+    requestAnimationFrame(() => highlightSelectedNoteText());
+  }, [pendingNoteHighlight, noteReadOnly]);
 
   function highlightSelectedNoteText() {
     const editor = document.getElementById("note-content-editor");
@@ -1798,15 +1807,21 @@ export default function App() {
               <p>{noteReadOnly ? "Your saved notes and highlights." : "A larger writing space for your learning notes."}</p>
             </div>
             <div className="note-editor-header-actions">
-              {noteReadOnly && noteCanEdit && <button type="button" className="note-edit-button"
-                onClick={() => setNoteReadOnly(false)}><Pencil size={15} /> Edit</button>}
+              {noteCanEdit && <button type="button" className="note-edit-button"
+                onClick={() => setNoteReadOnly((current) => !current)}>
+                <Pencil size={15} /> {noteReadOnly ? "Edit" : "Done editing"}
+              </button>}
               {noteCanEdit && <button type="button" className="note-highlight-button"
-                title={noteReadOnly ? "Enable editing to highlight selected text" : "Highlight selected text in yellow"}
+                title="Highlight selected text in yellow"
                 onMouseDown={rememberNoteSelection}
                 onClick={() => {
                   if (noteReadOnly) {
+                    if (!noteSelectionRangeRef.current) {
+                      setNotice("Select the text you want to highlight first.");
+                      return;
+                    }
+                    setPendingNoteHighlight(true);
                     setNoteReadOnly(false);
-                    setNotice("Editing enabled. Select the text you want to highlight, then click Highlight.");
                     return;
                   }
                   highlightSelectedNoteText();
