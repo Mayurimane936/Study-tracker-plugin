@@ -1756,8 +1756,17 @@ export default function App() {
             <div className="note-editor-header-actions">
               {noteReadOnly && noteCanEdit && <button type="button" className="note-edit-button"
                 onClick={() => setNoteReadOnly(false)}><Pencil size={15} /> Edit</button>}
-              {!noteReadOnly && <button type="button" className="note-highlight-button"
-                onMouseDown={(event) => event.preventDefault()} onClick={highlightSelectedNoteText}>
+              {noteCanEdit && <button type="button" className="note-highlight-button"
+                title={noteReadOnly ? "Enable editing to highlight selected text" : "Highlight selected text in yellow"}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  if (noteReadOnly) {
+                    setNoteReadOnly(false);
+                    setNotice("Editing enabled. Select the text you want to highlight, then click Highlight.");
+                    return;
+                  }
+                  highlightSelectedNoteText();
+                }}>
                 <Highlighter size={15} /> Highlight
               </button>}
               <button className="icon-button" onClick={() => setShowNoteForm(false)} aria-label="Close"><X size={18} /></button>
