@@ -714,39 +714,57 @@ export default function App() {
       .catch((err) => setError(err.message));
   }, [profile?.token]);
 
-  // Shared study sites are authoritative on the backend and scoped to the selected group.
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchStudySites() {
-      if (!profile?.token || !activeGroupId) {
-        setStudySites([]);
-        setStudySitesError("");
-        return;
-      }
-
-      setStudySitesLoading(true);
+  // Fetch the backend's authoritative group-site list. This is reused after
+  // approvals/rejections and by the periodic refresh for other group members.
+  async function refreshStudySites({ silent = false } = {}) {
+    if (!profile?.token || !activeGroupId) {
+      setStudySites([]);
       setStudySitesError("");
-      try {
-        const response = await apiFetch(
-          profile.token,
-          `/groups/${activeGroupId}/study-sites`
-        );
-        const data = await response.json().catch(() => []);
-        if (!response.ok) {
-          throw new Error(apiErrorMessage(data.detail, "Couldn't load shared study sites."));
-        }
-        if (!cancelled) setStudySites(Array.isArray(data) ? data : (data.items || []));
-      } catch (err) {
-        if (!cancelled) setStudySitesError(err.message || "Couldn't load shared study sites.");
-      } finally {
-        if (!cancelled) setStudySitesLoading(false);
-      }
+      return;
     }
 
-    void fetchStudySites();
-    return () => { cancelled = true; };
-  }, [profile?.token, activeGroupId]);
+    if (!silent) setStudySitesLoading(true);
+    try {
+      const response = await apiFetch(
+        profile.token,
+        `/groups/${activeGroupId}/study-sites`
+      );
+      const data = await response.json().catch(() => []);
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data.detail, "Couldn't load shared study sites."));
+      }
+      const rows = Array.isArray(data)
+        ? data
+        : (data.items || data.sites || data.study_sites || []);
+      setStudySites(Array.isArray(rows) ? rows : []);
+      setStudySitesError("");
+    } catch (err) {
+      setStudySitesError(err.message || "Couldn't load shared study sites.");
+    } finally {
+      if (!silent) setStudySitesLoading(false);
+    }
+  }
+
+  // Load on group/page changes and poll while Study Sites is open so other
+  // members see approvals without manually refreshing their browser.
+  useEffect(() => {
+    if (!profile?.token || !activeGroupId) {
+      setStudySites([]);
+      setStudySitesError("");
+      return undefined;
+    }
+
+    void refreshStudySites();
+    if (activePage !== "study-sites") return undefined;
+
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void refreshStudySites({ silent: true });
+      }
+    }, 15000);
+
+    return () => window.clearInterval(refreshTimer);
+  }, [profile?.token, activeGroupId, activePage]);
 
   async function submitStudySite(event) {
     event.preventDefault();
@@ -795,9 +813,9 @@ export default function App() {
       if (!response.ok) {
         throw new Error(apiErrorMessage(data.detail, `Couldn't ${decision} this site.`));
       }
-      setStudySites((current) => current.map((item) =>
-        item.id === site.id ? { ...item, ...data } : item
-      ));
+      // Re-fetch the canonical list instead of relying on the action response
+      // shape; some APIs return only a success message or partial site object.
+      await refreshStudySites({ silent: true });
       setNotice(`${site.domain} ${decision === "approve" ? "approved" : "rejected"}.`);
     } catch (err) {
       setStudySitesError(err.message || `Couldn't ${decision} this site.`);
