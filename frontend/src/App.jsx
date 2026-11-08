@@ -5,7 +5,7 @@ import {
   LayoutDashboard, LoaderCircle, LogOut, PartyPopper, Plus, RefreshCw,
   Search, Sparkles, Target, Trash2, Trophy, UserRound, Users, X,
   Globe2, ShieldCheck, CircleCheck, CircleX, Clock4,
-  Pencil, Highlighter,
+  Pencil, Highlighter, Play, Pause,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip,
@@ -156,6 +156,128 @@ function StatCard({ title, value, subtitle, icon: Icon, tone }) {
       <h2 className="stat-value">{value}</h2>
       <p className="stat-subtitle">{subtitle}</p>
     </article>
+  );
+}
+
+
+function GroupActivityWidget({ activity, loading, error, updatedAt, groupName, onRefresh }) {
+  const members = activity?.members || [];
+  const recent = activity?.recent_activity || [];
+
+  return (
+    <>
+      <style>{`
+        .group-activity-panel { margin-bottom: 22px; overflow: hidden; }
+        .group-activity-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+        .group-activity-kicker { display:inline-flex; align-items:center; gap:7px; color:#6f5bd3; font-size:10px; font-weight:800; letter-spacing:.13em; }
+        .group-activity-head h2 { margin:7px 0 4px; font-size:21px; color:#24213b; }
+        .group-activity-head p { margin:0; color:#85839a; font-size:12px; line-height:1.5; }
+        .group-activity-refresh { display:inline-flex; align-items:center; gap:7px; border:1px solid #e9e6f4; border-radius:10px; background:#fff; color:#5f55a0; padding:9px 12px; font-size:12px; font-weight:700; cursor:pointer; }
+        .group-activity-refresh:disabled { opacity:.55; cursor:wait; }
+        .group-activity-updated { color:#9996a9; font-size:10px; margin-top:7px; text-align:right; }
+        .group-activity-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:11px; margin:20px 0; }
+        .group-activity-stat { border:1px solid #eeebf7; border-radius:13px; padding:13px 15px; background:linear-gradient(145deg,#fff,#faf9ff); min-width:0; }
+        .group-activity-stat span { display:block; color:#88859b; font-size:11px; }
+        .group-activity-stat strong { display:block; color:#28243f; font-size:20px; margin-top:5px; font-weight:800; }
+        .group-activity-section-title { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:18px 0 11px; }
+        .group-activity-section-title h3 { margin:0; color:#302c48; font-size:14px; }
+        .group-activity-section-title span { color:#9895a8; font-size:11px; }
+        .group-member-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+        .group-member-card { border:1px solid #eeebf5; border-radius:14px; padding:14px; min-width:0; background:#fff; }
+        .group-member-top { display:flex; align-items:center; gap:10px; }
+        .group-member-avatar { width:37px; height:37px; flex:0 0 37px; border-radius:12px; display:grid; place-items:center; color:#6252bc; background:#f0edff; font-size:12px; font-weight:800; }
+        .group-member-name { min-width:0; flex:1; }
+        .group-member-name strong { display:block; color:#302c46; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .group-member-name span { display:block; margin-top:3px; color:#9692a6; font-size:10px; }
+        .group-member-total { text-align:right; color:#5e50b1; font-size:14px; font-weight:800; white-space:nowrap; }
+        .group-member-topics { border-top:1px solid #f0eef6; margin-top:12px; padding-top:10px; }
+        .group-member-topic { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; }
+        .group-member-topic-copy { min-width:0; }
+        .group-member-topic-copy strong { display:block; color:#514c69; font-size:11px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .group-member-topic-copy span { display:block; color:#a09caf; font-size:10px; margin-top:2px; }
+        .group-member-topic time { color:#66608f; font-size:10px; font-weight:700; white-space:nowrap; }
+        .group-member-no-activity { color:#aaa6b7; font-size:11px; padding:10px 0 2px; }
+        .group-recent-list { display:grid; gap:0; }
+        .group-recent-item { display:flex; align-items:center; gap:11px; padding:11px 2px; border-top:1px solid #f0eef6; }
+        .group-recent-icon { width:32px; height:32px; border-radius:10px; flex:0 0 32px; display:grid; place-items:center; color:#6d5bd0; background:#f2efff; }
+        .group-recent-copy { min-width:0; flex:1; }
+        .group-recent-copy strong { display:block; color:#48435f; font-size:11px; }
+        .group-recent-copy span { display:block; margin-top:3px; color:#9692a5; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .group-recent-meta { text-align:right; white-space:nowrap; }
+        .group-recent-meta strong { display:block; color:#5f54a3; font-size:11px; }
+        .group-recent-meta span { display:block; color:#a19daf; font-size:10px; margin-top:3px; }
+        .group-activity-empty { border:1px dashed #ded9ef; border-radius:13px; padding:24px 14px; text-align:center; color:#8e8aa2; font-size:12px; }
+        .group-activity-error { margin-top:12px; color:#bd4758; background:#fff4f5; border-radius:9px; padding:10px 12px; font-size:12px; }
+        @media(max-width:720px) { .group-member-grid { grid-template-columns:1fr; } .group-activity-stats { gap:7px; } .group-activity-stat { padding:11px; } .group-activity-stat strong { font-size:17px; } }
+      `}</style>
+      <section className="panel group-activity-panel">
+        <div className="group-activity-head">
+          <div>
+            <span className="group-activity-kicker">GROUP ACTIVITY · TODAY</span>
+            <h2>What everyone studied</h2>
+            <p>{groupName || "Your group"} · Shared activity for {activity?.date || "today"} · India time</p>
+          </div>
+          <div>
+            <button type="button" className="group-activity-refresh" onClick={onRefresh} disabled={loading}>
+              <RefreshCw size={14} className={loading ? "spin" : ""} /> Refresh
+            </button>
+            {updatedAt && <div className="group-activity-updated">Updated {formatTime(updatedAt)}</div>}
+          </div>
+        </div>
+
+        {error && <div className="group-activity-error">{error}</div>}
+
+        <div className="group-activity-stats">
+          <div className="group-activity-stat"><span>Total group study time</span><strong>{formatDuration(activity?.total_seconds || 0)}</strong></div>
+          <div className="group-activity-stat"><span>Members studied</span><strong>{activity?.active_members_count ?? 0} / {activity?.members_count ?? 0}</strong></div>
+          <div className="group-activity-stat"><span>Sessions completed</span><strong>{activity?.sessions_count ?? 0}</strong></div>
+        </div>
+
+        <div className="group-activity-section-title">
+          <h3>Member-wise progress</h3>
+          <span>{members.length} group {members.length === 1 ? "member" : "members"}</span>
+        </div>
+
+        {loading && !activity ? <div className="group-activity-empty">Loading your group's activity…</div>
+          : members.length === 0 ? <div className="group-activity-empty">No members found in this group.</div>
+            : <div className="group-member-grid">
+              {members.map((member) => (
+                <article className="group-member-card" key={member.user_id}>
+                  <div className="group-member-top">
+                    <span className="group-member-avatar">{getInitials(member.name)}</span>
+                    <div className="group-member-name"><strong>{member.name}</strong><span>{member.sessions_count} session{member.sessions_count === 1 ? "" : "s"} today</span></div>
+                    <strong className="group-member-total">{formatDuration(member.total_seconds)}</strong>
+                  </div>
+                  <div className="group-member-topics">
+                    {member.topics?.length ? member.topics.map((topic, index) => (
+                      <div className="group-member-topic" key={`${member.user_id}-${topic.topic}-${topic.domain}-${index}`}>
+                        <div className="group-member-topic-copy"><strong>{topic.topic}</strong><span>{topic.domain || "General"} · {topic.sessions_count} session{topic.sessions_count === 1 ? "" : "s"}</span></div>
+                        <time>{formatDuration(topic.total_seconds)}</time>
+                      </div>
+                    )) : <div className="group-member-no-activity">No study sessions recorded today yet.</div>}
+                  </div>
+                </article>
+              ))}
+            </div>}
+
+        <div className="group-activity-section-title" style={{ marginTop: 22 }}>
+          <h3>Recent group activity</h3>
+          <span>Latest completed sessions</span>
+        </div>
+        {recent.length ? <div className="group-recent-list">
+          {recent.slice(0, 8).map((item) => (
+            <div className="group-recent-item" key={item.id}>
+              <span className="group-recent-icon"><BookOpen size={15} /></span>
+              <div className="group-recent-copy"><strong>{item.member_name} · {item.topic}</strong><span>{item.domain || "General"} · {item.site_title || "Study session"}</span></div>
+              <div className="group-recent-meta"><strong>{formatDuration(item.duration_seconds)}</strong><span>{formatTime(item.started_at)}</span></div>
+            </div>
+          ))}
+        </div> : <div className="group-activity-empty">Completed group sessions will appear here as members finish and sync their study sessions.</div>}
+        <p style={{ margin: "12px 0 0", color: "#9995a8", fontSize: 10 }}>
+          Activity refreshes every 15 seconds. Browser-tracked sessions appear after they are completed and synced.
+        </p>
+      </section>
+    </>
   );
 }
 
@@ -452,6 +574,10 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState(null);
   const [winners, setWinners] = useState([]);
   const [roundWinners, setRoundWinners] = useState([]);
+  const [groupActivity, setGroupActivity] = useState(null);
+  const [groupActivityLoading, setGroupActivityLoading] = useState(false);
+  const [groupActivityError, setGroupActivityError] = useState("");
+  const [groupActivityUpdatedAt, setGroupActivityUpdatedAt] = useState("");
   const [notifications, setNotifications] = useState(() =>
     profile?.id ? readLocalArray(`studytrack_notifications_${profile.id}`) : []
   );
@@ -612,6 +738,34 @@ export default function App() {
     }
   }, [profile, activeGroupId]);
 
+  const refreshGroupActivity = useCallback(async ({ silent = false } = {}) => {
+    if (!profile?.token || !activeGroupId) {
+      setGroupActivity(null);
+      setGroupActivityError("");
+      setGroupActivityUpdatedAt("");
+      return;
+    }
+
+    if (!silent) setGroupActivityLoading(true);
+    try {
+      const response = await apiFetch(
+        profile.token,
+        `/groups/${activeGroupId}/activity/today`
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data.detail, "Couldn't load group activity."));
+      }
+      setGroupActivity(data);
+      setGroupActivityError("");
+      setGroupActivityUpdatedAt(new Date().toISOString());
+    } catch (err) {
+      setGroupActivityError(err.message || "Couldn't load group activity.");
+    } finally {
+      if (!silent) setGroupActivityLoading(false);
+    }
+  }, [profile?.token, activeGroupId]);
+
   const checkRoundWinnerAnnouncements = useCallback(async () => {
     if (!profile?.token || !groups.length) return;
     try {
@@ -699,6 +853,32 @@ export default function App() {
   useEffect(() => {
     if (profile?.token) queueMicrotask(() => void loadDashboard());
   }, [profile?.token, activeGroupId, loadDashboard]);
+
+  useEffect(() => {
+    if (!profile?.token || !activeGroupId) {
+      setGroupActivity(null);
+      setGroupActivityError("");
+      setGroupActivityUpdatedAt("");
+      return undefined;
+    }
+
+    void refreshGroupActivity();
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void refreshGroupActivity({ silent: true });
+      }
+    }, 15000);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void refreshGroupActivity({ silent: true });
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [profile?.token, activeGroupId, refreshGroupActivity]);
 
   useEffect(() => {
     if (!profile?.token || !groups.length) return undefined;
@@ -827,6 +1007,31 @@ export default function App() {
       if (listResponse.ok) setStudySites(Array.isArray(listData) ? listData : (listData.items || []));
     } catch (err) {
       setStudySitesError(err.message || "Couldn't submit this study site.");
+    } finally {
+      setStudySiteBusyId(null);
+    }
+  }
+
+  async function manageStudySite(site, action) {
+    if (!activeGroupId || !site?.id) return;
+    setStudySiteBusyId(site.id);
+    setStudySitesError("");
+    setNotice("");
+    try {
+      const path = `/groups/${activeGroupId}/study-sites/${site.id}`;
+      const response = action === "delete"
+        ? await apiFetch(profile.token, path, { method: "DELETE" })
+        : await apiFetch(profile.token, `${path}/${action}`, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data.detail, `Couldn't ${action} this study site.`));
+      }
+      await refreshStudySites({ silent: true });
+      setNotice(action === "delete"
+        ? `${site.domain} deleted from this group.`
+        : `${site.domain} ${action === "pause" ? "paused" : "resumed"}.`);
+    } catch (err) {
+      setStudySitesError(err.message || `Couldn't ${action} this study site.`);
     } finally {
       setStudySiteBusyId(null);
     }
@@ -1402,6 +1607,15 @@ export default function App() {
           {notice && <div className="alert alert-success"><Check size={17} /><span>{notice}</span><button className="alert-dismiss" aria-label="Dismiss message" onClick={() => setNotice("")}><X size={16} /></button></div>}
 
           {activePage === "overview" && <>
+            {activeGroupId && <GroupActivityWidget
+              activity={groupActivity}
+              loading={groupActivityLoading}
+              error={groupActivityError}
+              updatedAt={groupActivityUpdatedAt}
+              groupName={groups.find((group) => String(group.id) === String(activeGroupId))?.name}
+              onRefresh={() => void refreshGroupActivity()}
+            />}
+            {activeGroupId && <p style={{ margin: "0 0 12px", color: "#9692a5", fontSize: 11 }}>Your personal progress</p>}
             <section className="stats-grid">
               <StatCard title="Total study time" value={loading && !summary ? "—" : formatDuration(summary?.total_seconds)} subtitle="Across all recorded sessions" icon={Clock3} tone="purple" />
               <StatCard title="Study sessions" value={summary?.sessions_count ?? "—"} subtitle="Sessions recorded so far" icon={Activity} tone="blue" />
@@ -1540,7 +1754,7 @@ export default function App() {
                 <div>
                   <span className="modal-kicker">GROUP STUDY WORKSPACE</span>
                   <h2>Shared study sites</h2>
-                  <p>Propose a website for this group. Another member must approve it before browser study sessions from that site are accepted.</p>
+                  <p>Propose a website for this group. Another member must approve it before tracking starts. You can pause or delete sites you suggested; the group owner can manage every site.</p>
                 </div>
               </div>
 
@@ -1570,9 +1784,15 @@ export default function App() {
                   : <div className="study-site-list">
                     {studySites.map((site) => {
                       const isProposer = String(site.proposed_by) === String(profile.id);
+                      const currentGroup = groups.find((group) => String(group.id) === activeGroupId);
+                      const isGroupOwner = String(currentGroup?.created_by) === String(profile.id);
+                      const canManage = isProposer || isGroupOwner;
                       const status = String(site.status || "pending").toLowerCase();
-                      const statusIcon = status === "approved" ? CircleCheck : status === "rejected" ? CircleX : Clock4;
+                      const isPaused = status === "approved" && site.enabled === false;
+                      const visibleStatus = isPaused ? "paused" : status;
+                      const statusIcon = isPaused ? Clock4 : status === "approved" ? CircleCheck : status === "rejected" ? CircleX : Clock4;
                       const StatusIcon = statusIcon;
+                      const busy = studySiteBusyId === site.id;
                       return <article className="study-site-card" key={site.id}>
                         <div className="study-site-card-icon"><Globe2 size={19} /></div>
                         <div className="study-site-card-main">
@@ -1580,16 +1800,24 @@ export default function App() {
                           <span>Suggested by {isProposer ? "you" : (site.proposed_by_name || "a group member")}</span>
                           {site.reviewed_by_name && <small>Reviewed by {site.reviewed_by_name}</small>}
                         </div>
-                        <span className={`study-site-status status-${status}`}><StatusIcon size={14} />{status}</span>
+                        <span className={`study-site-status status-${isPaused ? "pending" : status}`}><StatusIcon size={14} />{visibleStatus}</span>
                         {status === "pending" && !isProposer && <div className="study-site-review-actions">
-                          <button className="site-approve-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "approve")} title="Approve site">
-                            {studySiteBusyId === site.id ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Approve
+                          <button className="site-approve-button" disabled={busy} onClick={() => reviewStudySite(site, "approve")} title="Approve site">
+                            {busy ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Approve
                           </button>
-                          <button className="site-reject-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "reject")} title="Reject site">
+                          <button className="site-reject-button" disabled={busy} onClick={() => reviewStudySite(site, "reject")} title="Reject site">
                             <X size={15} /> Reject
                           </button>
                         </div>}
                         {status === "pending" && isProposer && <span className="study-site-awaiting">Waiting for another member</span>}
+                        {canManage && <div className="study-site-review-actions">
+                          {status === "approved" && <button className="site-approve-button" disabled={busy} onClick={() => manageStudySite(site, isPaused ? "resume" : "pause")} title={isPaused ? "Resume tracking" : "Pause tracking"}>
+                            {busy ? <LoaderCircle size={15} className="spin" /> : isPaused ? <Play size={15} /> : <Pause size={15} />}{isPaused ? "Resume" : "Pause"}
+                          </button>}
+                          <button className="site-reject-button" disabled={busy} onClick={() => manageStudySite(site, "delete")} title="Delete study site">
+                            <Trash2 size={15} /> Delete
+                          </button>
+                        </div>}
                       </article>;
                     })}
                   </div>}

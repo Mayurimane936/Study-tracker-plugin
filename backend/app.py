@@ -304,6 +304,21 @@ class GroupStudySite(Base):
         nullable=False,
     )
 
+    enabled: Mapped[bool] = mapped_column(
+        default=True,
+        nullable=False,
+    )
+
+    paused_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     reviewed_by: Mapped[Optional[int]] = mapped_column(
         ForeignKey("st_users.id", ondelete="SET NULL"),
         nullable=True,
@@ -572,6 +587,22 @@ class CompetitionRoundWinner(Base):
 
 # Creates any new tables, including st_group_study_sites.
 Base.metadata.create_all(engine)
+
+# Add the enabled flag to existing installations without requiring a manual
+# database reset. PostgreSQL supports ADD COLUMN IF NOT EXISTS.
+with engine.begin() as connection:
+    connection.execute(text(
+        "ALTER TABLE st_group_study_sites "
+        "ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE"
+    ))
+    connection.execute(text(
+        "ALTER TABLE st_group_study_sites "
+        "ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ NULL"
+    ))
+    connection.execute(text(
+        "ALTER TABLE st_group_study_sites "
+        "ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL"
+    ))
 
 
 # ============================================================
@@ -844,6 +875,7 @@ def study_site_json(
         "group_id": site.group_id,
         "domain": site.domain,
         "status": site.status,
+        "enabled": bool(site.enabled),
         "proposed_by": site.proposed_by,
         "proposed_by_name": (
             proposer.name if proposer else "Unknown"
@@ -1759,6 +1791,7 @@ def list_groups(
             "id": group.id,
             "name": group.name,
             "invite_code": group.invite_code,
+            "created_by": group.created_by,
             "member_count": count,
         })
 
@@ -1792,20 +1825,23 @@ def propose_study_site(
     )
 
     if existing:
-        if existing.status == "approved":
+        if existing.deleted_at is None and existing.status == "approved":
             raise HTTPException(
                 status_code=409,
                 detail="This website is already approved for your group.",
             )
 
-        if existing.status == "pending":
+        if existing.deleted_at is None and existing.status == "pending":
             raise HTTPException(
                 status_code=409,
                 detail="This website is already awaiting approval.",
             )
 
-        # Allow a rejected website to be proposed again.
+        # Allow a rejected or previously deleted website to be proposed again.
         existing.status = "pending"
+        existing.enabled = True
+        existing.paused_at = None
+        existing.deleted_at = None
         existing.proposed_by = user.id
         existing.reviewed_by = None
         existing.reviewed_at = None
@@ -1857,7 +1893,8 @@ def list_group_study_sites(
     )
 
     query = select(GroupStudySite).where(
-        GroupStudySite.group_id == group_id
+        GroupStudySite.group_id == group_id,
+        GroupStudySite.deleted_at.is_(None),
     )
 
     if status:
@@ -1977,6 +2014,104 @@ def reject_study_site(
         "message": "Website rejected.",
         "site": study_site_json(site, db),
     }
+
+
+@app.post("/groups/{group_id}/study-sites/{site_id}/pause")
+def pause_group_study_site(
+    group_id: int,
+    site_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(group_id, user, db)
+    site = db.scalar(select(GroupStudySite).where(
+        GroupStudySite.id == site_id,
+        GroupStudySite.group_id == group_id,
+    ))
+    if site is None:
+        raise HTTPException(status_code=404, detail="Study site not found.")
+
+    group = db.get(StudyGroup, group_id)
+    if site.proposed_by != user.id and group.created_by != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the member who suggested this site or the group owner can manage it.",
+        )
+    if site.status != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="Only approved study sites can be paused.",
+        )
+
+    site.enabled = False
+    site.paused_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(site)
+    return {"message": "Study site paused.", "site": study_site_json(site, db)}
+
+
+@app.post("/groups/{group_id}/study-sites/{site_id}/resume")
+def resume_group_study_site(
+    group_id: int,
+    site_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(group_id, user, db)
+    site = db.scalar(select(GroupStudySite).where(
+        GroupStudySite.id == site_id,
+        GroupStudySite.group_id == group_id,
+    ))
+    if site is None:
+        raise HTTPException(status_code=404, detail="Study site not found.")
+
+    group = db.get(StudyGroup, group_id)
+    if site.proposed_by != user.id and group.created_by != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the member who suggested this site or the group owner can manage it.",
+        )
+    if site.status != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="Only approved study sites can be resumed.",
+        )
+
+    site.enabled = True
+    site.paused_at = None
+    db.commit()
+    db.refresh(site)
+    return {"message": "Study site resumed.", "site": study_site_json(site, db)}
+
+
+@app.delete("/groups/{group_id}/study-sites/{site_id}")
+def delete_group_study_site(
+    group_id: int,
+    site_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(group_id, user, db)
+    site = db.scalar(select(GroupStudySite).where(
+        GroupStudySite.id == site_id,
+        GroupStudySite.group_id == group_id,
+    ))
+    if site is None:
+        raise HTTPException(status_code=404, detail="Study site not found.")
+
+    group = db.get(StudyGroup, group_id)
+    if site.proposed_by != user.id and group.created_by != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the member who suggested this site or the group owner can delete it.",
+        )
+
+    now = datetime.now(timezone.utc)
+    site.enabled = False
+    site.paused_at = now
+    site.deleted_at = now
+    db.commit()
+    return {"message": "Study site deleted.", "id": site_id}
 
 
 # ============================================================
@@ -2273,16 +2408,34 @@ def website_sync(
         except HTTPException:
             continue
 
-        # Group website tracking requires an approved site.
-        # Personal sessions without a group retain existing behavior.
+        started = aware_datetime(item.startedAt)
+        ended = aware_datetime(item.endedAt)
+
+        if ended < started:
+            continue
+
+        # Group tracking requires an approved site. If a site was paused or
+        # deleted after a session began, accept only the portion up to that
+        # action time so already-earned study time is not lost.
         if item.group_id is not None:
             approved_site = db.scalar(
-                select(GroupStudySite.id).where(
+                select(GroupStudySite).where(
                     GroupStudySite.group_id == item.group_id,
                     GroupStudySite.status == "approved",
                     (
                         (GroupStudySite.domain == host)
                         | host.endswith("." + GroupStudySite.domain)
+                    ),
+                    (
+                        GroupStudySite.enabled.is_(True)
+                        | (
+                            GroupStudySite.paused_at.is_not(None)
+                            & (GroupStudySite.paused_at > started)
+                        )
+                        | (
+                            GroupStudySite.deleted_at.is_not(None)
+                            & (GroupStudySite.deleted_at > started)
+                        )
                     ),
                 )
             )
@@ -2291,8 +2444,14 @@ def website_sync(
                 unapproved += 1
                 continue
 
-        started = aware_datetime(item.startedAt)
-        ended = aware_datetime(item.endedAt)
+            stop_at = None
+            if approved_site.deleted_at is not None:
+                stop_at = approved_site.deleted_at
+            elif not approved_site.enabled:
+                stop_at = approved_site.paused_at
+
+            if stop_at is not None and ended > stop_at:
+                ended = stop_at
 
         if ended < started:
             continue
@@ -2311,7 +2470,10 @@ def website_sync(
             group_id=item.group_id,
             topic=item.subject.strip() or "General",
             domain=host,
-            duration_seconds=item.durationSeconds,
+            duration_seconds=min(
+                max(0, int(item.durationSeconds)),
+                max(0, int((ended - started).total_seconds())),
+            ),
             started_at=started,
             ended_at=ended,
             site_url="https://" + host,
@@ -2751,6 +2913,131 @@ def dashboard(
 # ============================================================
 # GROUP DATE ROUNDS AND MONTHLY WINNERS
 # ============================================================
+
+
+@app.get("/groups/{group_id}/activity/today")
+def group_activity_today(
+    group_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Return today's completed study activity for every member of a group.
+
+    The date boundary is calculated in Asia/Kolkata and converted to UTC,
+    matching the timezone used by StudyTrack's dashboard and competition.
+    """
+    workspace_group(group_id, user, db)
+
+    today = india_today()
+    local_start = datetime.combine(
+        today,
+        datetime.min.time(),
+        tzinfo=INDIA_TZ,
+    )
+    local_end = local_start + timedelta(days=1)
+    start_utc = local_start.astimezone(timezone.utc)
+    end_utc = local_end.astimezone(timezone.utc)
+
+    member_rows = db.execute(
+        select(User.id, User.name)
+        .join(Membership, Membership.user_id == User.id)
+        .where(Membership.group_id == group_id)
+        .order_by(User.name.asc())
+    ).all()
+
+    members = {
+        member_id: {
+            "user_id": member_id,
+            "name": member_name,
+            "total_seconds": 0,
+            "sessions_count": 0,
+            "topics": {},
+        }
+        for member_id, member_name in member_rows
+    }
+
+    session_rows = db.execute(
+        select(StudySession, User.name)
+        .join(User, User.id == StudySession.user_id)
+        .where(
+            StudySession.group_id == group_id,
+            StudySession.started_at >= start_utc,
+            StudySession.started_at < end_utc,
+        )
+        .order_by(StudySession.started_at.desc())
+    ).all()
+
+    recent_activity = []
+    total_seconds = 0
+
+    for session, member_name in session_rows:
+        seconds = max(0, int(session.duration_seconds or 0))
+        topic_name = (session.topic or "General").strip() or "General"
+        domain_name = (session.domain or "General").strip() or "General"
+        member = members.get(session.user_id)
+
+        # A session is included only if its owner is still a member of this group.
+        if member is None:
+            continue
+
+        member["total_seconds"] += seconds
+        member["sessions_count"] += 1
+        total_seconds += seconds
+
+        topic_key = (topic_name, domain_name)
+        topic = member["topics"].setdefault(
+            topic_key,
+            {
+                "topic": topic_name,
+                "domain": domain_name,
+                "total_seconds": 0,
+                "sessions_count": 0,
+            },
+        )
+        topic["total_seconds"] += seconds
+        topic["sessions_count"] += 1
+
+        started_local = to_india_datetime(session.started_at)
+        recent_activity.append({
+            "id": session.id,
+            "user_id": session.user_id,
+            "member_name": member_name,
+            "topic": topic_name,
+            "domain": domain_name,
+            "duration_seconds": seconds,
+            "started_at": started_local.isoformat(),
+            "site_title": session.site_title or session.site_url or domain_name,
+            "site_url": session.site_url,
+        })
+
+    member_list = []
+    for member in members.values():
+        topic_list = sorted(
+            member["topics"].values(),
+            key=lambda item: (-item["total_seconds"], item["topic"].lower(), item["domain"].lower()),
+        )
+        member["topics"] = topic_list
+        member_list.append(member)
+
+    member_list.sort(
+        key=lambda item: (-item["total_seconds"], item["name"].lower())
+    )
+
+    return {
+        "group_id": group_id,
+        "date": today.isoformat(),
+        "timezone": "Asia/Kolkata",
+        "total_seconds": total_seconds,
+        "sessions_count": len(recent_activity),
+        "members_count": len(member_list),
+        "active_members_count": sum(
+            1 for member in member_list if member["total_seconds"] > 0
+        ),
+        "members": member_list,
+        "recent_activity": recent_activity[:20],
+        "updated_at": india_now().isoformat(),
+    }
+
 
 @app.get("/groups/{group_id}/leaderboard")
 def leaderboard(
