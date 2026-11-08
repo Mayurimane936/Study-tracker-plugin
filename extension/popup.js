@@ -42,6 +42,7 @@ let timerState = {
 
 let activeWebsiteSession = null;
 let trackedSites = [];
+let pendingGroupSites = [];
 let refreshInProgress = false;
 let notebookTopics = [];
 const CREATE_DOMAIN_OPTION = "__studytrack_create_domain__";
@@ -145,6 +146,7 @@ syncGroupSelect.addEventListener("change", async () => {
       groupId: syncGroupSelect.value || null
     });
     setStatus(accountStatus, "Session workspace updated.");
+    await refreshAutomaticTracking();
   } catch (error) {
     setStatus(accountStatus, error.message, true);
   }
@@ -419,7 +421,10 @@ async function refreshAutomaticTracking() {
     });
 
     activeWebsiteSession = response.active || null;
-    trackedSites = response.sites || [];
+    trackedSites = Array.isArray(response.sites) ? response.sites : [];
+    pendingGroupSites = Array.isArray(response.pendingSites)
+      ? response.pendingSites
+      : [];
 
     renderAutomaticStatus();
     renderStudySites();
@@ -444,7 +449,7 @@ function renderStudySites() {
 
   sitesList.replaceChildren();
 
-  if (trackedSites.length === 0) {
+  if (trackedSites.length === 0 && pendingGroupSites.length === 0) {
     const empty = document.createElement("li");
     empty.className = "empty";
     empty.textContent = "No study websites added yet.";
@@ -466,35 +471,57 @@ function renderStudySites() {
 
     const subject = document.createElement("div");
     subject.className = "site-subject";
-    subject.textContent = `Topic: ${site.subject}`;
+    subject.textContent = `Topic: ${site.subject || "DSA"} · ${
+      site.groupId ? "Approved for group tracking" : "Personal workspace"
+    }`;
 
     info.append(domain, subject);
 
-    const removeButton = document.createElement("button");
-    removeButton.className = "remove-btn";
-    removeButton.textContent = "Remove";
-    removeButton.type = "button";
+    row.append(info);
 
-    removeButton.addEventListener("click", async () => {
-      removeButton.disabled = true;
+    // Group-approved sites are controlled by the dashboard's shared-site workflow.
+    if (!site.groupId) {
+      const removeButton = document.createElement("button");
+      removeButton.className = "remove-btn";
+      removeButton.textContent = "Remove";
+      removeButton.type = "button";
 
-      try {
-        await sendMessage({
-          action: "REMOVE_STUDY_SITE",
-          domain: site.domain
-        });
+      removeButton.addEventListener("click", async () => {
+        removeButton.disabled = true;
 
-        setStatus(siteStatus, `Removed ${site.domain}.`);
-        await refreshAutomaticTracking();
-      } catch (error) {
-        setStatus(siteStatus, error.message, true);
-      } finally {
-        removeButton.disabled = false;
-      }
-    });
+        try {
+          await sendMessage({
+            action: "REMOVE_STUDY_SITE",
+            domain: site.domain
+          });
 
-    row.append(info, removeButton);
+          setStatus(siteStatus, `Removed ${site.domain}.`);
+          await refreshAutomaticTracking();
+        } catch (error) {
+          setStatus(siteStatus, error.message, true);
+        } finally {
+          removeButton.disabled = false;
+        }
+      });
+
+      row.appendChild(removeButton);
+    }
+
     item.appendChild(row);
+    sitesList.appendChild(item);
+  });
+
+  pendingGroupSites.forEach(site => {
+    const item = document.createElement("li");
+    const domain = document.createElement("div");
+    domain.className = "site-domain";
+    domain.textContent = site.domain || "Unknown website";
+
+    const status = document.createElement("div");
+    status.className = "site-subject";
+    status.textContent = "Approval pending · Visible to your group in Study Sites";
+
+    item.append(domain, status);
     sitesList.appendChild(item);
   });
 }
@@ -510,7 +537,7 @@ addSiteBtn.addEventListener("click", async () => {
   addSiteBtn.disabled = true;
 
   try {
-    await sendMessage({
+    const result = await sendMessage({
       action: "ADD_STUDY_SITE",
       domain,
       subject: siteSubjectSelect.value
@@ -520,7 +547,9 @@ addSiteBtn.addEventListener("click", async () => {
 
     setStatus(
       siteStatus,
-      "Study website added successfully."
+      result.submittedForApproval
+        ? "Website submitted. Another group member must approve it before tracking starts."
+        : "Study website added to your personal workspace."
     );
 
     await refreshAutomaticTracking();

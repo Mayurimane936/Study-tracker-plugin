@@ -333,6 +333,7 @@
   let topicsLoaded = false;
   let busy = false;
   let siteConfig = null;
+  let pendingSite = null;
   let activeSession = null;
   let elapsedMs = 0;
   let stoppedSession = false;
@@ -527,17 +528,19 @@
     const isActive = Boolean(
       activeSession && activeSession.hostname === domain
     );
-
+    const isPending = Boolean(
+      pendingSite &&
+      String(pendingSite.status || pendingSite.approval_status || "pending").toLowerCase() === "pending"
+    );
     const isListed = Boolean(siteConfig);
 
     timer.classList.toggle("hidden", !isActive && !stoppedSession);
     sessionLabel.classList.toggle("hidden", !isActive && !stoppedSession);
 
     stopButton.classList.toggle("hidden", !isActive);
-    removeButton.classList.toggle("hidden", !isListed);
-
-    startButton.classList.toggle("hidden", isActive);
-    addButton.classList.toggle("hidden", isListed);
+    removeButton.classList.toggle("hidden", !isListed || Boolean(siteConfig?.groupId));
+    startButton.classList.toggle("hidden", isActive || isPending);
+    addButton.classList.toggle("hidden", isListed || isPending);
 
     if (isActive) {
       cardMode = "active";
@@ -549,6 +552,15 @@
         setStatus(activeSession.isPaused
           ? "Study timer paused. Return to this website to resume."
           : "Your study time is being recorded.");
+      }
+    } else if (isPending) {
+      cardMode = "pending";
+      timer.classList.add("hidden");
+      sessionLabel.classList.add("hidden");
+      notNowButton.textContent = "Minimize";
+
+      if (!busy) {
+        setStatus("Approval pending. This website will be available for group tracking after another member approves it.");
       }
     } else if (isListed) {
       cardMode = "listed";
@@ -566,7 +578,9 @@
         sessionLabel.classList.add("hidden");
 
         if (!busy) {
-          setStatus("This website is in your study list.");
+          setStatus(siteConfig?.groupId
+            ? "This website is approved for your group."
+            : "This website is in your personal study list.");
         }
       }
     } else {
@@ -574,14 +588,14 @@
       notNowButton.textContent = "Not now";
 
       if (!busy && topicsLoaded) {
-        setStatus("Choose a topic, then add this site to start tracking.");
+        setStatus("Choose a topic, then add this site to your study list.");
       }
     }
 
     updateControls();
   }
 
-  async function refreshState() {
+    async function refreshState() {
     if (refreshInProgress) return;
 
     refreshInProgress = true;
@@ -592,6 +606,7 @@
       });
 
       siteConfig = findMatchingSite(data.sites);
+      pendingSite = findMatchingSite(data.pendingSites);
 
       activeSession = data.active && (
         data.active.hostname === domain ||
@@ -618,6 +633,7 @@
       });
 
       siteConfig = findMatchingSite(data.sites);
+      pendingSite = findMatchingSite(data.pendingSites);
 
       activeSession = data.active && (
         data.active.hostname === domain ||
@@ -717,6 +733,7 @@
       });
 
       siteConfig = findMatchingSite(response.sites);
+      pendingSite = response.pendingSite || null;
 
       activeSession = response.active &&
         response.active.hostname === domain
@@ -728,9 +745,15 @@
 
       renderState();
 
-      setStatus(activeSession
-        ? `Study session started: ${subject}`
-        : `Website added to your study list under ${subject}.`);
+      if (response.submittedForApproval) {
+        setStatus(
+          `Approval requested for ${domain}. It will become trackable after another group member approves it.`
+        );
+      } else {
+        setStatus(activeSession
+          ? `Study session started: ${subject}`
+          : `Website added to your personal study list under ${subject}.`);
+      }
     } catch (error) {
       setStatus(error.message, true);
     } finally {

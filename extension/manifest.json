@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "StudyTrack",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Track study time and save learning notes.",
   "minimum_chrome_version": "109",
   "permissions": [
@@ -22,7 +22,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "<all_urls>"
+      ],
       "js": [
         "content.js",
         "study-prompt.js"

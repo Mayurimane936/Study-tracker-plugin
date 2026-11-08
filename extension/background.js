@@ -70,6 +70,12 @@ async function connectAccount(email, password) {
   void syncWebsiteSessionsToBackend();
   void syncManualStudySessionsToBackend();
   void syncLocalNotesToBackend();
+  const groupId = await selectedGroupId();
+  if (groupId) {
+    void refreshGroupStudySites(true).then(() => enqueue(syncActiveTab)).catch(error => {
+      console.warn("StudyTrack: Could not load shared study sites after login.", error);
+    });
+  }
 
   return data.user;
 }
@@ -232,6 +238,11 @@ chrome.runtime.onStartup.addListener(() => {
       );
     }
 
+    try {
+      await refreshGroupStudySites(true);
+    } catch (error) {
+      console.warn("StudyTrack: Startup group-site refresh failed.", error);
+    }
     await syncActiveTab();
     await syncWebsiteSessionsToBackend();
   });
@@ -241,6 +252,12 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === CHECKPOINT_ALARM) {
     enqueue(async () => {
       await checkpointActiveSession(Date.now());
+      try {
+        await refreshGroupStudySites(true);
+      } catch (error) {
+        console.warn("StudyTrack: Group study sites refresh failed.", error);
+      }
+      await syncActiveTab();
       await syncWebsiteSessionsToBackend();
       await syncManualStudySessionsToBackend();
       await syncLocalNotesToBackend();
@@ -356,11 +373,145 @@ function findSiteConfig(hostname, sites) {
   return matches[0] || null;
 }
 
+function normalizeGroupSiteRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.sites)) return payload.sites;
+  if (Array.isArray(payload?.study_sites)) return payload.study_sites;
+  return [];
+}
+
+function getGroupSiteStatus(site) {
+  return String(site?.status || site?.approval_status || "pending")
+    .trim()
+    .toLowerCase();
+}
+
+async function fetchGroupStudySites(groupId) {
+  if (!groupId) return [];
+
+  const response = await authenticatedFetch(
+    `/groups/${encodeURIComponent(groupId)}/study-sites`
+  );
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(
+      `Could not load group study websites (${response.status}). ${detail.slice(0, 250)}`
+    );
+  }
+
+  return normalizeGroupSiteRows(await response.json());
+}
+
+/**
+ * Refreshes the selected group's shared sites from the backend.
+ * The backend is authoritative; local storage is only an approved-site cache.
+ */
+async function refreshGroupStudySites(force = false) {
+  const groupId = await selectedGroupId();
+
+  if (!groupId) {
+    return { all: [], pending: [] };
+  }
+
+  const { studyTrackAuth, studyTrackGroupSitesCache = {} } =
+    await chrome.storage.local.get([
+      "studyTrackAuth",
+      "studyTrackGroupSitesCache"
+    ]);
+
+  if (!studyTrackAuth?.token) {
+    return {
+      all: studyTrackGroupSitesCache[String(groupId)]?.items || [],
+      pending: (studyTrackGroupSitesCache[String(groupId)]?.items || [])
+        .filter(site => getGroupSiteStatus(site) === "pending")
+    };
+  }
+
+  const cache = studyTrackGroupSitesCache[String(groupId)];
+  const cacheIsFresh = cache?.fetchedAt &&
+    Date.now() - cache.fetchedAt < 30000;
+
+  if (!force && cacheIsFresh) {
+    const rows = Array.isArray(cache.items) ? cache.items : [];
+    return {
+      all: rows,
+      pending: rows.filter(site => getGroupSiteStatus(site) === "pending")
+    };
+  }
+
+  const rows = await fetchGroupStudySites(groupId);
+  const nextCache = {
+    ...studyTrackGroupSitesCache,
+    [String(groupId)]: {
+      fetchedAt: Date.now(),
+      items: rows
+    }
+  };
+
+  const { studySites = [] } =
+    await chrome.storage.local.get("studySites");
+
+  // Replace only this group's cache; keep personal and other-group sites intact.
+  const retained = (Array.isArray(studySites) ? studySites : [])
+    .filter(site => Number(site?.groupId || 0) !== Number(groupId));
+
+  const { studyTrackGroupSiteSubjects = {} } =
+    await chrome.storage.local.get("studyTrackGroupSiteSubjects");
+  const approved = rows
+    .filter(site => getGroupSiteStatus(site) === "approved")
+    .map(site => {
+      const domain = normalizeDomain(site.domain);
+      const savedSubject = studyTrackGroupSiteSubjects[
+        `${groupId}:${domain}`
+      ];
+      return ({
+      domain,
+      subject: String(site.subject || savedSubject || "DSA").trim() || "DSA",
+      enabled: true,
+      groupId: Number(groupId),
+      backendSiteId: site.id ?? null,
+      approvalStatus: "approved",
+      scope: "group"
+    });
+    });
+
+  await chrome.storage.local.set({
+    studyTrackGroupSitesCache: nextCache,
+    studySites: [...retained, ...approved]
+  });
+
+  return {
+    all: rows,
+    pending: rows.filter(site => getGroupSiteStatus(site) === "pending")
+  };
+}
+
 async function getWebsiteSites() {
   const { studySites = [] } =
     await chrome.storage.local.get("studySites");
 
-  return Array.isArray(studySites) ? studySites : [];
+  const groupId = await selectedGroupId();
+  const allSites = Array.isArray(studySites) ? studySites : [];
+
+  // Keep personal workspace sites isolated from each group's approved sites.
+  return allSites.filter(site =>
+    groupId
+      ? Number(site?.groupId || 0) === Number(groupId)
+      : !site?.groupId
+  );
+}
+
+async function getPendingGroupStudySites() {
+  const groupId = await selectedGroupId();
+  if (!groupId) return [];
+
+  const { studyTrackGroupSitesCache = {} } =
+    await chrome.storage.local.get("studyTrackGroupSitesCache");
+
+  const rows = studyTrackGroupSitesCache[String(groupId)]?.items || [];
+  return rows.filter(site => getGroupSiteStatus(site) === "pending");
 }
 
 async function checkpointActiveSession(endTime = Date.now()) {
@@ -998,7 +1149,19 @@ async function handleMessage(message, sender) {
 
     case "SET_SYNC_GROUP": {
       const groupId = message.groupId ? Number(message.groupId) : null;
+      if (groupId !== null && (!Number.isInteger(groupId) || groupId <= 0)) {
+        throw new Error("Choose a valid StudyTrack group.");
+      }
+
+      // Finish the current session under the workspace where it started.
+      await finalizeActiveSession(Date.now());
       await chrome.storage.local.set({ studyTrackGroupId: groupId });
+
+      if (groupId) {
+        await refreshGroupStudySites(true);
+      }
+
+      await enqueue(syncActiveTab);
       return { success: true, groupId };
     }
 
@@ -1060,6 +1223,15 @@ async function handleMessage(message, sender) {
     }
 
     case "GET_WEBSITE_TRACKING_DATA": {
+      let pendingSites = [];
+      try {
+        const groupSites = await refreshGroupStudySites(false);
+        pendingSites = groupSites.pending;
+      } catch (error) {
+        console.warn("StudyTrack: Could not refresh shared study sites.", error);
+        pendingSites = await getPendingGroupStudySites();
+      }
+
       await enqueue(syncActiveTab);
 
       // Try syncing existing history when the popup opens too.
@@ -1104,6 +1276,7 @@ async function handleMessage(message, sender) {
       return {
         success: true,
         sites: await getWebsiteSites(),
+        pendingSites,
         active: active || null,
         elapsedMs,
         stopped: isStoppedHere
@@ -1114,26 +1287,90 @@ async function handleMessage(message, sender) {
     // The popup no longer shows an Add Website form.
     case "ADD_STUDY_SITE": {
       const domain = normalizeDomain(message.domain);
-      const subject = String(message.subject || "DSA").trim();
-      const sites = await getWebsiteSites();
+      const subject = String(message.subject || "DSA").trim() || "DSA";
+      const groupId = await selectedGroupId();
 
-      let site = sites.find(item => item.domain === domain);
+      // Group sites must be reviewed by another group member before tracking.
+      if (groupId) {
+        const response = await authenticatedFetch(
+          `/groups/${encodeURIComponent(groupId)}/study-sites`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domain })
+          }
+        );
 
-      if (site) {
-        site.subject = subject || site.subject || "DSA";
-      } else {
-        site = {
-          domain,
-          subject: subject || "DSA",
-          enabled: true
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          if (response.status === 409) {
+            await refreshGroupStudySites(true).catch(() => {});
+            throw new Error(
+              `${domain} is already submitted or configured for this group. Check Study Sites in the dashboard.`
+            );
+          }
+          throw new Error(
+            `Could not submit ${domain} for approval (${response.status}). ${detail.slice(0, 250)}`
+          );
+        }
+
+        const proposal = await response.json().catch(() => null);
+        const { studyTrackGroupSiteSubjects = {} } =
+          await chrome.storage.local.get("studyTrackGroupSiteSubjects");
+        await chrome.storage.local.set({
+          studyTrackGroupSiteSubjects: {
+            ...studyTrackGroupSiteSubjects,
+            [`${groupId}:${domain}`]: subject
+          }
+        });
+        const refreshed = await refreshGroupStudySites(true);
+        const matching = refreshed.all.find(item => {
+          try {
+            return normalizeDomain(item.domain) === domain;
+          } catch {
+            return false;
+          }
+        }) || proposal;
+
+        await chrome.storage.local.remove("stoppedWebsiteSession");
+
+        return {
+          success: true,
+          submittedForApproval: true,
+          pendingSite: matching || {
+            domain,
+            status: "pending",
+            subject
+          },
+          pendingSites: refreshed.pending,
+          sites: await getWebsiteSites(),
+          active: null
         };
-        sites.push(site);
       }
 
-      await chrome.storage.local.set({
-        studySites: sites
-      });
+      // Personal workspace sites remain local and do not need group approval.
+      const { studySites: allSites = [] } =
+        await chrome.storage.local.get("studySites");
+      const sites = (Array.isArray(allSites) ? allSites : [])
+        .filter(site => site?.groupId || site.domain !== domain);
 
+      let site = null;
+
+      if (!site) {
+        site = {
+          domain,
+          subject,
+          enabled: true,
+          groupId: null,
+          scope: "personal",
+          approvalStatus: "approved"
+        };
+        sites.push(site);
+      } else {
+        site.subject = subject;
+      }
+
+      await chrome.storage.local.set({ studySites: sites });
       await chrome.storage.local.remove("stoppedWebsiteSession");
       await enqueue(syncActiveTab);
 
@@ -1142,7 +1379,8 @@ async function handleMessage(message, sender) {
 
       return {
         success: true,
-        sites,
+        submittedForApproval: false,
+        sites: await getWebsiteSites(),
         site,
         active: active || null
       };
@@ -1191,16 +1429,17 @@ async function handleMessage(message, sender) {
       const sites = await getWebsiteSites();
       const existing = sites.find(site => site.domain === domain);
 
-      if (existing) {
-        existing.subject = subject;
-        existing.enabled = true;
-      } else {
-        sites.push({
-          domain,
-          subject,
-          enabled: true
-        });
+      if (!existing) {
+        const groupId = await selectedGroupId();
+        throw new Error(
+          groupId
+            ? "This website is not approved for your group yet. Submit it for approval in StudyTrack."
+            : "Add this website to your personal study list before starting."
+        );
       }
+
+      existing.subject = subject;
+      existing.enabled = true;
 
       const now = Date.now();
 
@@ -1218,8 +1457,18 @@ async function handleMessage(message, sender) {
 
       await chrome.storage.local.remove("stoppedWebsiteSession");
 
+      const { studySites: allStoredSites = [] } =
+        await chrome.storage.local.get("studySites");
+      const updatedAllSites = (Array.isArray(allStoredSites) ? allStoredSites : [])
+        .map(site => {
+          const sameScope = Number(site?.groupId || 0) === Number(existing.groupId || 0);
+          return site?.domain === domain && sameScope
+            ? { ...site, subject, enabled: true }
+            : site;
+        });
+
       await chrome.storage.local.set({
-        studySites: sites,
+        studySites: updatedAllSites,
         activeWebsiteSession: active
       });
 
@@ -1272,16 +1521,23 @@ async function handleMessage(message, sender) {
 
     case "REMOVE_STUDY_SITE": {
       const domain = normalizeDomain(message.domain);
+      const groupId = await selectedGroupId();
 
-      // Save active time before removing the site from the list.
+      if (groupId) {
+        throw new Error(
+          "Shared group websites are managed from the StudyTrack dashboard. Only approved sites can be used for group tracking."
+        );
+      }
+
+      // Save active time before removing the personal site.
       await finalizeActiveSession(Date.now(), domain);
 
-      const sites = (await getWebsiteSites())
-        .filter(site => site.domain !== domain);
+      const { studySites: allSites = [] } =
+        await chrome.storage.local.get("studySites");
+      const sites = (Array.isArray(allSites) ? allSites : [])
+        .filter(site => site?.groupId || site.domain !== domain);
 
-      await chrome.storage.local.set({
-        studySites: sites
-      });
+      await chrome.storage.local.set({ studySites: sites });
 
       const { stoppedWebsiteSession: stopped } =
         await chrome.storage.local.get("stoppedWebsiteSession");
@@ -1300,7 +1556,7 @@ async function handleMessage(message, sender) {
 
       return {
         success: true,
-        sites
+        sites: await getWebsiteSites()
       };
     }
 

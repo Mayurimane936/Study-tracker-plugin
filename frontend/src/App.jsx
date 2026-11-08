@@ -4,6 +4,7 @@ import {
   Clock3, Code2, FileText, Flame, FolderOpen,
   LayoutDashboard, LoaderCircle, LogOut, PartyPopper, Plus, RefreshCw,
   Search, Sparkles, Target, Trash2, Trophy, UserRound, Users, X,
+  Globe2, ShieldCheck, CircleCheck, CircleX, Clock4,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip,
@@ -63,6 +64,7 @@ const navigation = [
   { id: "sessions", label: "Study sessions", icon: Clock3 },
   { id: "notes", label: "My notes", icon: FileText },
   { id: "topics", label: "Topics", icon: FolderOpen },
+  { id: "study-sites", label: "Study sites", icon: Globe2 },
   { id: "competition", label: "Competition", icon: Trophy },
 ];
 
@@ -453,6 +455,11 @@ export default function App() {
   const [showManualDomainForm, setShowManualDomainForm] = useState(false);
   const [manualDomainName, setManualDomainName] = useState("");
   const [manualDomainError, setManualDomainError] = useState("");
+  const [studySites, setStudySites] = useState([]);
+  const [studySitesLoading, setStudySitesLoading] = useState(false);
+  const [studySitesError, setStudySitesError] = useState("");
+  const [studySiteDraft, setStudySiteDraft] = useState("");
+  const [studySiteBusyId, setStudySiteBusyId] = useState(null);
 
   // Keep the selected page synchronized when the account changes.
   useEffect(() => {
@@ -706,6 +713,98 @@ export default function App() {
       })
       .catch((err) => setError(err.message));
   }, [profile?.token]);
+
+  // Shared study sites are authoritative on the backend and scoped to the selected group.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchStudySites() {
+      if (!profile?.token || !activeGroupId) {
+        setStudySites([]);
+        setStudySitesError("");
+        return;
+      }
+
+      setStudySitesLoading(true);
+      setStudySitesError("");
+      try {
+        const response = await apiFetch(
+          profile.token,
+          `/groups/${activeGroupId}/study-sites`
+        );
+        const data = await response.json().catch(() => []);
+        if (!response.ok) {
+          throw new Error(apiErrorMessage(data.detail, "Couldn't load shared study sites."));
+        }
+        if (!cancelled) setStudySites(Array.isArray(data) ? data : (data.items || []));
+      } catch (err) {
+        if (!cancelled) setStudySitesError(err.message || "Couldn't load shared study sites.");
+      } finally {
+        if (!cancelled) setStudySitesLoading(false);
+      }
+    }
+
+    void fetchStudySites();
+    return () => { cancelled = true; };
+  }, [profile?.token, activeGroupId]);
+
+  async function submitStudySite(event) {
+    event.preventDefault();
+    const domain = studySiteDraft.trim();
+    if (!activeGroupId || !domain) return;
+
+    setStudySiteBusyId("submit");
+    setStudySitesError("");
+    setNotice("");
+    try {
+      const response = await apiFetch(
+        profile.token,
+        `/groups/${activeGroupId}/study-sites`,
+        { method: "POST", body: JSON.stringify({ domain }) }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data.detail, "Couldn't submit this study site."));
+      }
+      setStudySiteDraft("");
+      setNotice(data.status === "approved"
+        ? `${data.domain || domain} is already approved for this group.`
+        : `${data.domain || domain} submitted for group approval.`);
+      const listResponse = await apiFetch(profile.token, `/groups/${activeGroupId}/study-sites`);
+      const listData = await listResponse.json().catch(() => []);
+      if (listResponse.ok) setStudySites(Array.isArray(listData) ? listData : (listData.items || []));
+    } catch (err) {
+      setStudySitesError(err.message || "Couldn't submit this study site.");
+    } finally {
+      setStudySiteBusyId(null);
+    }
+  }
+
+  async function reviewStudySite(site, decision) {
+    if (!activeGroupId || !site?.id) return;
+    setStudySiteBusyId(site.id);
+    setStudySitesError("");
+    setNotice("");
+    try {
+      const response = await apiFetch(
+        profile.token,
+        `/groups/${activeGroupId}/study-sites/${site.id}/${decision}`,
+        { method: "POST" }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data.detail, `Couldn't ${decision} this site.`));
+      }
+      setStudySites((current) => current.map((item) =>
+        item.id === site.id ? { ...item, ...data } : item
+      ));
+      setNotice(`${site.domain} ${decision === "approve" ? "approved" : "rejected"}.`);
+    } catch (err) {
+      setStudySitesError(err.message || `Couldn't ${decision} this site.`);
+    } finally {
+      setStudySiteBusyId(null);
+    }
+  }
 
   const filteredSessions = sessions.filter((s) => {
     const q = search.toLowerCase();
@@ -1060,6 +1159,7 @@ export default function App() {
     sessions: ["Study sessions", "Review the time you've spent learning."],
     notes: ["My notes", "Keep your learning and ideas in one place."],
     topics: ["Your topics", "Organize your learning by subject."],
+    "study-sites": ["Shared study sites", "Suggest websites for your group and review proposals from other members."],
     competition: ["Date-round competition", "Track four weekly rounds and your group’s monthly champion."],
   };
   const [pageTitle, pageSubtitle] = pageTitles[activePage] || pageTitles.overview;
@@ -1295,6 +1395,78 @@ export default function App() {
             })}</div>}
           </section>}
 
+          {activePage === "study-sites" && <section className="panel page-panel">
+            {!activeGroupId ? <div className="study-sites-empty-workspace">
+              <span className="study-sites-hero-icon"><Users size={24} /></span>
+              <h2>Choose a group workspace</h2>
+              <p>Shared study sites belong to a group. Create a group or join one to suggest websites and review other members’ proposals.</p>
+              <div className="competition-actions">
+                <button className="primary-button" onClick={() => setGroupDialog("create")}><Plus size={16} /> Create group</button>
+                <button className="secondary-button" onClick={() => setGroupDialog("join")}><Users size={16} /> Join group</button>
+              </div>
+            </div> : <>
+              <div className="study-sites-intro">
+                <div className="study-sites-intro-icon"><Globe2 size={22} /></div>
+                <div>
+                  <span className="modal-kicker">GROUP STUDY WORKSPACE</span>
+                  <h2>Shared study sites</h2>
+                  <p>Propose a website for this group. Another member must approve it before browser study sessions from that site are accepted.</p>
+                </div>
+              </div>
+
+              <form className="study-site-submit" onSubmit={submitStudySite}>
+                <label htmlFor="study-site-domain">Website domain or URL</label>
+                <div className="study-site-input-row">
+                  <input id="study-site-domain" type="text" required maxLength={1000}
+                    placeholder="e.g. leetcode.com or https://www.geeksforgeeks.org"
+                    value={studySiteDraft} onChange={(event) => setStudySiteDraft(event.target.value)} />
+                  <button className="primary-button" disabled={studySiteBusyId === "submit" || !studySiteDraft.trim()}>
+                    {studySiteBusyId === "submit" ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}
+                    Submit proposal
+                  </button>
+                </div>
+                <span className="field-hint">Use a domain or website URL. Pending sites are not tracked for this group.</span>
+              </form>
+
+              {studySitesError && <div className="alert alert-error"><span>{studySitesError}</span><button className="alert-dismiss" onClick={() => setStudySitesError("")} aria-label="Dismiss error"><X size={16} /></button></div>}
+
+              <div className="study-sites-list-heading">
+                <div><h3>Group website proposals</h3><p>Any other group member can review a pending proposal.</p></div>
+                <span className="study-sites-count">{studySites.length} site{studySites.length === 1 ? "" : "s"}</span>
+              </div>
+
+              {studySitesLoading ? <div className="table-loading"><LoaderCircle className="spin" size={22} /> Loading shared sites...</div>
+                : studySites.length === 0 ? <EmptyState icon={Globe2} title="No shared sites yet" description="Suggest the first study website for your group." />
+                : <div className="study-site-list">
+                  {studySites.map((site) => {
+                    const isProposer = String(site.proposed_by) === String(profile.id);
+                    const status = String(site.status || "pending").toLowerCase();
+                    const statusIcon = status === "approved" ? CircleCheck : status === "rejected" ? CircleX : Clock4;
+                    const StatusIcon = statusIcon;
+                    return <article className="study-site-card" key={site.id}>
+                      <div className="study-site-card-icon"><Globe2 size={19} /></div>
+                      <div className="study-site-card-main">
+                        <strong>{site.domain}</strong>
+                        <span>Suggested by {isProposer ? "you" : (site.proposed_by_name || "a group member")}</span>
+                        {site.reviewed_by_name && <small>Reviewed by {site.reviewed_by_name}</small>}
+                      </div>
+                      <span className={`study-site-status status-${status}`}><StatusIcon size={14} />{status}</span>
+                      {status === "pending" && !isProposer && <div className="study-site-review-actions">
+                        <button className="site-approve-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "approve")} title="Approve site">
+                          {studySiteBusyId === site.id ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Approve
+                        </button>
+                        <button className="site-reject-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "reject")} title="Reject site">
+                          <X size={15} /> Reject
+                        </button>
+                      </div>}
+                      {status === "pending" && isProposer && <span className="study-site-awaiting">Waiting for another member</span>}
+                    </article>;
+                  })}
+                </div>}
+              <div className="study-sites-policy"><ShieldCheck size={17} /><span>Only approved websites can contribute browser-tracked sessions to this group. Approval is shared with all group members.</span></div>
+            </>}
+          </section>}
+
           {activePage === "competition" && <>
             {!activeGroupId ? <section className="panel page-panel">
               <EmptyState icon={Users} title="Choose a group workspace" description="Create a group or join with an invite code to view date-round standings and monthly winners." />
@@ -1392,6 +1564,42 @@ export default function App() {
         @media(max-width:700px){.round-winner-grid{grid-template-columns:1fr}.winner-total-pill{align-self:flex-start}.winner-showcase-heading{align-items:flex-start;flex-wrap:wrap}.winner-notification-banner{align-items:flex-start;flex-wrap:wrap}.winner-alerts-button{margin-left:51px}}
         @media(max-width:600px){.notification-panel{right:-52px}.winner-celebration-card{padding:34px 20px 24px}.winner-celebration-name{font-size:25px}.winner-showcase-heading{gap:11px}.winner-heading-icon{width:44px;height:44px;flex-basis:44px;border-radius:14px}.winner-heading-copy h2{font-size:19px}.winner-alerts-button{margin-left:0}.winner-round-track{gap:5px}.winner-round-track span{padding:6px 7px;font-size:9px}}
         @media(prefers-reduced-motion:reduce){.winner-celebration-backdrop,.winner-celebration-card,.winner-celebration-icon,.winner-celebration-glow,.celebration-confetti i{animation:none!important}.winner-row-clickable{transition:none}}
+
+
+        .study-sites-intro{display:flex;align-items:flex-start;gap:14px;padding:3px 0 22px;border-bottom:1px solid #efedf5}
+        .study-sites-intro-icon,.study-sites-hero-icon{width:48px;height:48px;flex:0 0 48px;display:grid;place-items:center;border-radius:15px;background:#eeeaff;color:#7059c8}
+        .study-sites-intro h2{margin:4px 0 5px;font-size:20px;color:var(--text,#29263a)}
+        .study-sites-intro p,.study-sites-empty-workspace p{max-width:650px;margin:0;color:var(--muted,#858197);font-size:12px;line-height:1.65}
+        .study-site-submit{display:grid;gap:8px;margin:22px 0 26px;padding:17px;border:1px solid #eae6f5;border-radius:16px;background:#fcfbff}
+        .study-site-submit label{font-size:12px;font-weight:800;color:#514a68}
+        .study-site-input-row{display:flex;gap:9px}
+        .study-site-input-row input{flex:1;min-width:0}
+        .study-sites-list-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 13px}
+        .study-sites-list-heading h3{margin:0 0 4px;font-size:15px;color:var(--text,#29263a)}
+        .study-sites-list-heading p{margin:0;color:var(--muted,#858197);font-size:11px}
+        .study-sites-count{padding:6px 10px;border-radius:99px;background:#f1effa;color:#6c5ab1;font-size:10px;font-weight:800;white-space:nowrap}
+        .study-site-list{display:grid;gap:10px}
+        .study-site-card{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px;border:1px solid #eeecf4;border-radius:14px;background:#fff}
+        .study-site-card-icon{width:38px;height:38px;flex:0 0 38px;display:grid;place-items:center;border-radius:12px;background:#f3f0ff;color:#7864c5}
+        .study-site-card-main{display:grid;gap:4px;flex:1;min-width:140px}
+        .study-site-card-main strong{font-size:13px;color:#302b43;overflow-wrap:anywhere}
+        .study-site-card-main span,.study-site-card-main small{font-size:10px;color:#8b879a}
+        .study-site-status{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border-radius:99px;font-size:10px;font-weight:800;text-transform:capitalize}
+        .study-site-status.status-approved{background:#eaf8f0;color:#278452}
+        .study-site-status.status-rejected{background:#fff0f0;color:#b84a50}
+        .study-site-status.status-pending{background:#fff7e8;color:#a8751c}
+        .study-site-review-actions{display:flex;gap:6px}
+        .study-site-review-actions button{display:inline-flex;align-items:center;gap:5px;padding:7px 9px;border:1px solid;border-radius:9px;background:white;font-size:10px;font-weight:800;cursor:pointer}
+        .site-approve-button{border-color:#bfe5ce!important;color:#278452}
+        .site-reject-button{border-color:#f0cdcd!important;color:#b84a50}
+        .study-site-review-actions button:disabled{opacity:.55;cursor:wait}
+        .study-site-awaiting{font-size:10px;color:#a8751c}
+        .study-sites-policy{display:flex;align-items:flex-start;gap:9px;margin-top:18px;padding:12px 14px;border-radius:12px;background:#f5f3ff;color:#6656a5;font-size:11px;line-height:1.55}
+        .study-sites-policy svg{flex:0 0 auto;margin-top:1px}
+        .study-sites-empty-workspace{display:grid;justify-items:center;text-align:center;padding:35px 15px}
+        .study-sites-empty-workspace h2{margin:14px 0 7px;font-size:20px}
+        .study-sites-empty-workspace p{margin-bottom:18px}
+        @media(max-width:650px){.study-site-input-row{flex-direction:column}.study-site-input-row .primary-button{justify-content:center}.study-site-card{align-items:flex-start}.study-site-status{margin-left:50px}.study-site-review-actions{margin-left:50px}.study-site-awaiting{margin-left:50px}}
       `}</style>
 
       {showManualSessionForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowManualSessionForm(false); }}>
