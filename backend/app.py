@@ -2373,6 +2373,7 @@ def create_session(
     return session_json(session)
 
 
+
 @app.post("/sessions/website-sync")
 def website_sync(
     items: list[WebsiteSyncItem],
@@ -2382,116 +2383,142 @@ def website_sync(
     saved = 0
     expired = 0
     unapproved = 0
+    duplicates = 0
 
-    for item in items:
-        workspace_group(
-            item.group_id,
-            user,
-            db,
-        )
-
-        existing = db.scalar(
-            select(StudySession).where(
-                StudySession.source_session_id == item.id
+    try:
+        for item in items:
+            workspace_group(
+                item.group_id,
+                user,
+                db,
             )
-        )
 
-        if existing:
-            # Never allow one user's sync to overwrite another user's session.
-            if existing.user_id != user.id:
-                continue
-
-            continue
-
-        try:
-            host = normalize_study_domain(item.domain)
-        except HTTPException:
-            continue
-
-        started = aware_datetime(item.startedAt)
-        ended = aware_datetime(item.endedAt)
-
-        if ended < started:
-            continue
-
-        # Group tracking requires an approved site. If a site was paused or
-        # deleted after a session began, accept only the portion up to that
-        # action time so already-earned study time is not lost.
-        if item.group_id is not None:
-            approved_site = db.scalar(
-                select(GroupStudySite).where(
-                    GroupStudySite.group_id == item.group_id,
-                    GroupStudySite.status == "approved",
-                    (
-                        (GroupStudySite.domain == host)
-                        | host.endswith("." + GroupStudySite.domain)
-                    ),
-                    (
-                        GroupStudySite.enabled.is_(True)
-                        | (
-                            GroupStudySite.paused_at.is_not(None)
-                            & (GroupStudySite.paused_at > started)
-                        )
-                        | (
-                            GroupStudySite.deleted_at.is_not(None)
-                            & (GroupStudySite.deleted_at > started)
-                        )
-                    ),
+            existing = db.scalar(
+                select(StudySession).where(
+                    StudySession.source_session_id == item.id
                 )
             )
 
-            if approved_site is None:
-                unapproved += 1
+            if existing:
+                if existing.user_id != user.id:
+                    continue
+
+                duplicates += 1
                 continue
 
-            stop_at = None
-            if approved_site.deleted_at is not None:
-                stop_at = approved_site.deleted_at
-            elif not approved_site.enabled:
-                stop_at = approved_site.paused_at
+            try:
+                host = normalize_study_domain(item.domain)
+            except HTTPException:
+                continue
 
-            if stop_at is not None and ended > stop_at:
-                ended = stop_at
+            started = aware_datetime(item.startedAt)
+            ended = aware_datetime(item.endedAt)
 
-        if ended < started:
-            continue
+            if ended < started:
+                continue
 
-        retention_cutoff = (
-            datetime.now(timezone.utc)
-            - timedelta(days=SESSION_RETENTION_DAYS)
-        )
+            if item.group_id is not None:
+                candidate_sites = db.scalars(
+                    select(GroupStudySite).where(
+                        GroupStudySite.group_id == item.group_id,
+                        GroupStudySite.status == "approved",
+                        (
+                            GroupStudySite.enabled.is_(True)
+                            |
+                            (
+                                GroupStudySite.paused_at.is_not(None)
+                                & (GroupStudySite.paused_at > started)
+                            )
+                            |
+                            (
+                                GroupStudySite.deleted_at.is_not(None)
+                                & (GroupStudySite.deleted_at > started)
+                            )
+                        ),
+                    )
+                ).all()
 
-        if ended < retention_cutoff:
-            expired += 1
-            continue
+                approved_site = next(
+                    (
+                        site
+                        for site in candidate_sites
+                        if (
+                            host == site.domain
+                            or host.endswith("." + site.domain)
+                        )
+                    ),
+                    None,
+                )
 
-        session = StudySession(
-            user_id=user.id,
-            group_id=item.group_id,
-            topic=item.subject.strip() or "General",
-            domain=host,
-            duration_seconds=min(
+                if approved_site is None:
+                    unapproved += 1
+                    continue
+
+                stop_at = None
+
+                if approved_site.deleted_at is not None:
+                    stop_at = approved_site.deleted_at
+                elif not approved_site.enabled:
+                    stop_at = approved_site.paused_at
+
+                if stop_at is not None and ended > stop_at:
+                    ended = stop_at
+
+            if ended < started:
+                continue
+
+            retention_cutoff = (
+                datetime.now(timezone.utc)
+                - timedelta(days=SESSION_RETENTION_DAYS)
+            )
+
+            if ended < retention_cutoff:
+                expired += 1
+                continue
+
+            duration = min(
                 max(0, int(item.durationSeconds)),
-                max(0, int((ended - started).total_seconds())),
-            ),
-            started_at=started,
-            ended_at=ended,
-            site_url="https://" + host,
-            site_title=item.title or host,
-            source_session_id=item.id,
+                max(
+                    0,
+                    int((ended - started).total_seconds()),
+                ),
+            )
+
+            if duration <= 0:
+                continue
+
+            session = StudySession(
+                user_id=user.id,
+                group_id=item.group_id,
+                topic=item.subject.strip() or "General",
+                domain=host,
+                duration_seconds=duration,
+                started_at=started,
+                ended_at=ended,
+                site_url="https://" + host,
+                site_title=item.title or host,
+                source_session_id=item.id,
+            )
+
+            db.add(session)
+            saved += 1
+
+        db.commit()
+
+        return {
+            "saved": saved,
+            "expired": expired,
+            "unapproved": unapproved,
+            "duplicates": duplicates,
+        }
+
+    except Exception:
+        db.rollback()
+        logger.exception("Website session sync failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Website session sync failed. Check backend logs.",
         )
-
-        db.add(session)
-        saved += 1
-
-    db.commit()
-
-    return {
-        "saved": saved,
-        "expired": expired,
-        "unapproved": unapproved,
-    }
-
 
 @app.get("/sessions")
 def list_sessions(
