@@ -5,6 +5,7 @@ import {
   LayoutDashboard, LoaderCircle, LogOut, PartyPopper, Plus, RefreshCw,
   Search, Sparkles, Target, Trash2, Trophy, UserRound, Users, X,
   Globe2, ShieldCheck, CircleCheck, CircleX, Clock4,
+  Pencil, Highlighter,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip,
@@ -57,6 +58,42 @@ function apiErrorMessage(detail, fallback) {
     const message = issue.msg || "is invalid";
     return field ? `${field}: ${message}` : message;
   }).join(". ");
+}
+
+// Allow only simple formatting tags in saved note content. This keeps rich-text
+// highlights while preventing scripts, event handlers, and unsafe attributes.
+function sanitizeNoteHtml(value = "") {
+  const parser = new DOMParser();
+  const documentNode = parser.parseFromString(`<div>${String(value)}</div>`, "text/html");
+  const root = documentNode.body.firstElementChild;
+  const allowedTags = new Set(["B", "STRONG", "I", "EM", "U", "MARK", "BR", "P", "DIV", "UL", "OL", "LI"]);
+
+  function clean(node) {
+    for (const child of [...node.childNodes]) {
+      if (child.nodeType === Node.TEXT_NODE) continue;
+      if (child.nodeType !== Node.ELEMENT_NODE) {
+        child.remove();
+        continue;
+      }
+      // execCommand commonly creates a styled span for highlighting. Convert
+      // only spans with a background color into semantic <mark> elements.
+      if (child.tagName === "SPAN" && child.style.backgroundColor) {
+        const mark = documentNode.createElement("mark");
+        mark.append(...child.childNodes);
+        child.replaceWith(mark);
+        continue;
+      }
+      clean(child);
+      if (!allowedTags.has(child.tagName)) {
+        child.replaceWith(...child.childNodes);
+      } else {
+        [...child.attributes].forEach((attribute) => child.removeAttribute(attribute.name));
+      }
+    }
+  }
+
+  clean(root);
+  return root.innerHTML;
 }
 
 const navigation = [
@@ -436,6 +473,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [showNoteForm, setShowNoteForm] = useState(false);
   const [noteReadOnly, setNoteReadOnly] = useState(false);
+  const [noteCanEdit, setNoteCanEdit] = useState(false);
   const [showTopicForm, setShowTopicForm] = useState(false);
   const [groupDialog, setGroupDialog] = useState("");
   const [groupName, setGroupName] = useState("");
@@ -967,6 +1005,7 @@ export default function App() {
 
   function startNotePage(topic = "", domain = "") {
     setNoteForm({ id: null, title: "", content: "", topic, domain });
+    setNoteCanEdit(true);
     setNoteReadOnly(false);
     setShowNoteForm(true);
   }
@@ -979,8 +1018,24 @@ export default function App() {
       topic: note.topic || "General",
       domain: note.domain || "General",
     });
-    setNoteReadOnly(!note.can_edit);
+    setNoteCanEdit(Boolean(note.can_edit));
+    // Existing pages open in reading mode. Use the top-right Edit control to edit.
+    setNoteReadOnly(true);
     setShowNoteForm(true);
+  }
+
+  function highlightSelectedNoteText() {
+    const editor = document.getElementById("note-content-editor");
+    if (!editor) return;
+    editor.focus();
+    let applied = false;
+    try {
+      applied = document.execCommand("hiliteColor", false, "#fff2a8");
+      if (!applied) document.execCommand("backColor", false, "#fff2a8");
+    } catch {
+      // Older browsers may not support the formatting command.
+    }
+    setNoteForm((current) => ({ ...current, content: sanitizeNoteHtml(editor.innerHTML) }));
   }
 
   async function deleteNotePage(note) {
@@ -1363,7 +1418,7 @@ export default function App() {
                     <button className="note-page-open"
                       title={note.can_edit ? "Open note page" : "View shared note page"}
                       onClick={() => openNotePage(note)}>
-                      <h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p>
+                      <h3>{note.title}</h3><p className="note-preview" dangerouslySetInnerHTML={{ __html: sanitizeNoteHtml(note.content || "No additional content.") }} />
                     </button>
                     <div className="note-card-footer"><span className="note-topic">{note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
                   </article>)}</div>
@@ -1375,7 +1430,7 @@ export default function App() {
                   <div className="note-card-top"><span className="note-card-icon"><FileText size={18} /></span><span className="note-date">{formatDate(note.updated_at)}</span></div>
                   <button className="note-page-open"
                     title={note.can_edit ? "Open note page" : "View shared note page"}
-                    onClick={() => openNotePage(note)}><h3>{note.title}</h3><p className="note-preview">{note.content || "No additional content."}</p></button>
+                    onClick={() => openNotePage(note)}><h3>{note.title}</h3><p className="note-preview" dangerouslySetInnerHTML={{ __html: sanitizeNoteHtml(note.content || "No additional content.") }} /></button>
                   <div className="note-card-footer"><span className="note-topic">{note.topic || "General"} · {note.domain || "General"}</span>{note.can_edit && <button className="note-delete" onClick={() => deleteNotePage(note)} aria-label={`Delete ${note.title}`} title="Delete page"><Trash2 size={15} /></button>}</div>
                 </article>)}</div>
               </section>}
@@ -1673,14 +1728,89 @@ export default function App() {
       </div>}
 
       {showNoteForm && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowNoteForm(false); }}>
-        <section className="modal" role="dialog" aria-modal="true">
-          <div className="modal-header"><div><span className="modal-kicker">TOPIC NOTEBOOK</span><h2>{noteReadOnly ? "View note page" : noteForm.id ? "Edit note page" : "Create a note page"}</h2><p>{noteReadOnly ? "Shared with everyone in this group." : "Save a separate page inside a topic and domain."}</p></div><button className="icon-button" onClick={() => setShowNoteForm(false)} aria-label="Close"><X size={18} /></button></div>
+        <section className="modal note-editor-modal" role="dialog" aria-modal="true" aria-label="Study note editor"
+          style={{ width: "min(1000px, calc(100vw - 32px))", maxWidth: "1000px", maxHeight: "94vh", overflowY: "auto" }}>
+          <style>{`
+            .note-editor-modal .modal-header { align-items: flex-start; gap: 16px; }
+            .note-editor-header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+            .note-edit-button { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #c7d7f5; border-radius: 9px; padding: 9px 13px; background: #edf4ff; color: #174ea6; font-weight: 700; cursor: pointer; }
+            .note-edit-button:hover { background: #dceaff; }
+            .note-highlight-toolbar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin: 6px 0 9px; }
+            .note-highlight-button { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #eadb8c; border-radius: 8px; padding: 8px 12px; background: #fff8d8; color: #755b00; font-size: 13px; font-weight: 700; cursor: pointer; }
+            .note-highlight-button:hover { background: #fff0ad; }
+            .note-content-editor { width: 100%; min-height: 460px; max-height: 62vh; overflow-y: auto; padding: 20px 22px; border: 1px solid #d8dee8; border-radius: 12px; background: #fff; color: #202124; font: 15px/1.8 Inter, Arial, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; }
+            .note-content-editor:focus { border-color: #6b9ce8; box-shadow: 0 0 0 3px #e8f0fe; }
+            .note-content-editor[contenteditable="false"] { background: #fafbfc; cursor: default; }
+            .note-content-editor mark { background: #fff2a8; border-radius: 3px; padding: 0 2px; }
+            .note-content-editor:empty:before { content: attr(data-placeholder); color: #9aa0a6; pointer-events: none; }
+            .note-editor-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+            @media (max-width: 640px) { .note-editor-modal .modal-header { flex-wrap: wrap; } .note-editor-header-actions { margin-left: 0; } .note-content-editor { min-height: 360px; padding: 14px; } .note-editor-meta { grid-template-columns: 1fr; } }
+          `}</style>
+
+          <div className="modal-header">
+            <div>
+              <span className="modal-kicker">TOPIC NOTEBOOK</span>
+              <h2>{noteReadOnly ? "View note page" : noteForm.id ? "Edit note page" : "Create a note page"}</h2>
+              <p>{noteReadOnly ? "Your saved notes and highlights." : "A larger writing space for your learning notes."}</p>
+            </div>
+            <div className="note-editor-header-actions">
+              {noteReadOnly && noteCanEdit && <button type="button" className="note-edit-button"
+                onClick={() => setNoteReadOnly(false)}><Pencil size={15} /> Edit</button>}
+              {!noteReadOnly && <button type="button" className="note-highlight-button"
+                onMouseDown={(event) => event.preventDefault()} onClick={highlightSelectedNoteText}>
+                <Highlighter size={15} /> Highlight
+              </button>}
+              <button className="icon-button" onClick={() => setShowNoteForm(false)} aria-label="Close"><X size={18} /></button>
+            </div>
+          </div>
+
           <form onSubmit={submitNote} className="modal-form">
-            <label htmlFor="note-title">Page title</label><input id="note-title" autoFocus={!noteReadOnly} readOnly={noteReadOnly} required maxLength={200} placeholder="e.g. Binary search — key idea" value={noteForm.title} onChange={(e) => setNoteForm({ ...noteForm, title: e.target.value })} />
-            <label htmlFor="note-topic">Topic</label><select id="note-topic" disabled={noteReadOnly} value={noteForm.topic} onChange={(e) => setNoteForm({ ...noteForm, topic: e.target.value, domain: "" })}><option value="">General</option>{topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}</select>
-            <label htmlFor="note-domain">Domain</label><select id="note-domain" disabled={noteReadOnly} value={noteForm.domain} onChange={(e) => setNoteForm({ ...noteForm, domain: e.target.value })}><option value="">General</option>{selectedTopicDomains.map((domain) => <option key={domain.id} value={domain.name}>{domain.name}</option>)}</select>
-            <label htmlFor="note-content">Page content</label><textarea id="note-content" readOnly={noteReadOnly} rows={8} placeholder="Write down the important points..." value={noteForm.content} onChange={(e) => setNoteForm({ ...noteForm, content: e.target.value })} />
-            <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowNoteForm(false)}>{noteReadOnly ? "Close" : "Cancel"}</button>{!noteReadOnly && <button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save page</button>}</div>
+            <label htmlFor="note-title">Page title</label>
+            <input id="note-title" autoFocus={!noteReadOnly} readOnly={noteReadOnly} required maxLength={200}
+              placeholder="e.g. Binary search — key idea" value={noteForm.title}
+              onChange={(e) => setNoteForm({ ...noteForm, title: e.target.value })} />
+
+            <div className="note-editor-meta">
+              <div>
+                <label htmlFor="note-topic">Topic</label>
+                <select id="note-topic" disabled={noteReadOnly} value={noteForm.topic}
+                  onChange={(e) => setNoteForm({ ...noteForm, topic: e.target.value, domain: "" })}>
+                  <option value="">General</option>
+                  {topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="note-domain">Domain</label>
+                <select id="note-domain" disabled={noteReadOnly} value={noteForm.domain}
+                  onChange={(e) => setNoteForm({ ...noteForm, domain: e.target.value })}>
+                  <option value="">General</option>
+                  {selectedTopicDomains.map((domain) => <option key={domain.id} value={domain.name}>{domain.name}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <label htmlFor="note-content-editor">Page content</label>
+            <div id="note-content-editor" className="note-content-editor"
+              contentEditable={!noteReadOnly} suppressContentEditableWarning
+              role="textbox" aria-label="Page content" aria-multiline="true"
+              data-placeholder="Start writing your notes here..."
+              dangerouslySetInnerHTML={{ __html: sanitizeNoteHtml(noteForm.content) }}
+              onInput={(event) => setNoteForm((current) => ({
+                ...current,
+                content: sanitizeNoteHtml(event.currentTarget.innerHTML),
+              }))}
+            />
+            <p className="small">Select any text and choose <strong>Highlight</strong> to mark important points in yellow.</p>
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setShowNoteForm(false)}>
+                {noteReadOnly ? "Close" : "Cancel"}
+              </button>
+              {!noteReadOnly && <button className="primary-button" disabled={saving}>
+                {saving ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
+                Save page
+              </button>}
+            </div>
           </form>
         </section>
       </div>}
