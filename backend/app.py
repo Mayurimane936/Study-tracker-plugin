@@ -1,3 +1,4 @@
+
 import os
 import re
 import hmac
@@ -13,6 +14,7 @@ from contextlib import suppress, asynccontextmanager
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Header, Query
@@ -56,12 +58,10 @@ _retention_task = None
 
 
 def india_now() -> datetime:
-    """Return the current timezone-aware Indian datetime."""
     return datetime.now(INDIA_TZ)
 
 
 def india_today() -> date:
-    """Return today's date in India."""
     return india_now().date()
 
 
@@ -267,6 +267,64 @@ class Domain(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
+    )
+
+
+# ============================================================
+# SHARED GROUP STUDY SITES MODEL
+# ============================================================
+
+class GroupStudySite(Base):
+    __tablename__ = "st_group_study_sites"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("st_groups.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    domain: Mapped[str] = mapped_column(
+        String(253),
+        nullable=False,
+    )
+
+    proposed_by: Mapped[int] = mapped_column(
+        ForeignKey("st_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="pending",
+        nullable=False,
+    )
+
+    reviewed_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("st_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "domain",
+            name="uq_st_group_study_site",
+        ),
     )
 
 
@@ -512,6 +570,7 @@ class CompetitionRoundWinner(Base):
     )
 
 
+# Creates any new tables, including st_group_study_sites.
 Base.metadata.create_all(engine)
 
 
@@ -694,6 +753,113 @@ def workspace_group(
             )
 
 
+def normalize_study_domain(value: str) -> str:
+    """
+    Normalize a website URL or domain to its hostname.
+
+    Examples:
+        https://leetcode.com/problems/ -> leetcode.com
+        www.github.com -> www.github.com
+        github.com -> github.com
+
+    Only HTTP and HTTPS URLs are accepted.
+    """
+
+    value = value.strip().lower()
+
+    if not value:
+        raise HTTPException(
+            status_code=400,
+            detail="Website domain is required.",
+        )
+
+    if "://" not in value:
+        value = "https://" + value
+
+    try:
+        parsed = urlsplit(value)
+
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Invalid scheme")
+
+        if not parsed.hostname:
+            raise ValueError("Missing hostname")
+
+        if parsed.username or parsed.password:
+            raise ValueError("Credentials are not allowed")
+
+        if parsed.port and not (
+            (parsed.scheme == "http" and parsed.port == 80)
+            or (parsed.scheme == "https" and parsed.port == 443)
+        ):
+            raise ValueError("Custom ports are not allowed")
+
+        hostname = (
+            parsed.hostname
+            .rstrip(".")
+            .encode("idna")
+            .decode("ascii")
+            .lower()
+        )
+
+        if (
+            len(hostname) > 253
+            or "." not in hostname
+            or any(
+                not re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                    label,
+                )
+                for label in hostname.split(".")
+            )
+        ):
+            raise ValueError("Invalid hostname")
+
+        return hostname
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a valid website domain, such as leetcode.com.",
+        )
+
+
+def study_site_json(
+    site: GroupStudySite,
+    db: Session,
+):
+    proposer = db.get(User, site.proposed_by)
+
+    reviewer = (
+        db.get(User, site.reviewed_by)
+        if site.reviewed_by
+        else None
+    )
+
+    return {
+        "id": site.id,
+        "group_id": site.group_id,
+        "domain": site.domain,
+        "status": site.status,
+        "proposed_by": site.proposed_by,
+        "proposed_by_name": (
+            proposer.name if proposer else "Unknown"
+        ),
+        "reviewed_by": site.reviewed_by,
+        "reviewed_by_name": (
+            reviewer.name if reviewer else None
+        ),
+        "reviewed_at": (
+            site.reviewed_at.isoformat()
+            if site.reviewed_at else None
+        ),
+        "created_at": site.created_at.isoformat(),
+    }
+
+
 def aware_datetime(value: datetime) -> datetime:
     """
     Make a datetime timezone-aware.
@@ -714,12 +880,9 @@ def to_india_datetime(value: datetime) -> datetime:
 def period_for(day: date):
     """
     Fixed date rounds:
-
-    1  - 7
-    8  - 14
-    15 - 21
-    22 - last day of month
+    1-7, 8-14, 15-21, 22-month-end.
     """
+
     month_end = date(
         day.year,
         day.month,
@@ -743,6 +906,7 @@ def period_for(day: date):
         end_day = month_end.day
 
     start = date(day.year, day.month, start_day)
+
     end = date(
         day.year,
         day.month,
@@ -766,14 +930,6 @@ def india_day_bounds_utc(
     start: date,
     end: date,
 ):
-    """
-    Convert an inclusive IST date range into UTC datetime bounds.
-
-    Example:
-    IST Nov 1 00:00 through Nov 7 23:59:59
-    becomes:
-    UTC Oct 31 18:30 through UTC Nov 7 18:30 (exclusive).
-    """
     start_ist = datetime.combine(
         start,
         datetime.min.time(),
@@ -855,11 +1011,6 @@ def save_month_winner(
     end: date,
     db: Session,
 ):
-    """
-    Save a monthly winner once.
-
-    Existing finalized records are never overwritten.
-    """
     record = db.scalar(
         select(CompetitionWinner).where(
             CompetitionWinner.group_id == group_id,
@@ -911,11 +1062,6 @@ def finalize_completed_months(
     group: StudyGroup,
     db: Session,
 ):
-    """
-    Finalize all completed months for this group.
-
-    The current month is never finalized.
-    """
     today = india_today()
 
     current_month_start, _ = month_for(today)
@@ -953,11 +1099,6 @@ def save_round_winner(
     end: date,
     db: Session,
 ):
-    """
-    Save a date-round winner once.
-
-    Once saved, the historical result is immutable.
-    """
     record = db.scalar(
         select(CompetitionRoundWinner).where(
             CompetitionRoundWinner.group_id == group_id,
@@ -1009,15 +1150,6 @@ def finalize_completed_rounds(
     group: StudyGroup,
     db: Session,
 ):
-    """
-    Finalize every completed date round.
-
-    Example:
-    On Nov 8, the Nov 1-7 round is finalized.
-    On Nov 15, the Nov 8-14 round is finalized.
-
-    The current round is never finalized.
-    """
     today = india_today()
 
     current_start, _ = period_for(today)
@@ -1145,12 +1277,6 @@ def prune_expired_sessions(
 
 
 async def session_retention_loop():
-    """
-    Check every 60 seconds.
-
-    This allows completed date rounds to be finalized
-    shortly after their IST boundary.
-    """
     while True:
         try:
             deleted = await asyncio.to_thread(
@@ -1224,6 +1350,13 @@ class DomainIn(BaseModel):
     name: str = Field(
         min_length=1,
         max_length=100,
+    )
+
+
+class StudySiteIn(BaseModel):
+    domain: str = Field(
+        min_length=3,
+        max_length=2000,
     )
 
 
@@ -1356,7 +1489,7 @@ api_docs_enabled = (
 
 app = FastAPI(
     title="StudyTrack API",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
     docs_url="/docs" if api_docs_enabled else None,
     redoc_url="/redoc" if api_docs_enabled else None,
@@ -1389,7 +1522,7 @@ def root():
     return {
         "app": "StudyTrack",
         "status": "ok",
-        "version": "2.2.0",
+        "version": "2.3.0",
     }
 
 
@@ -1630,6 +1763,220 @@ def list_groups(
         })
 
     return result
+
+
+# ============================================================
+# SHARED GROUP STUDY SITES
+# ============================================================
+
+@app.post("/groups/{group_id}/study-sites")
+def propose_study_site(
+    group_id: int,
+    data: StudySiteIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    domain = normalize_study_domain(data.domain)
+
+    existing = db.scalar(
+        select(GroupStudySite).where(
+            GroupStudySite.group_id == group_id,
+            GroupStudySite.domain == domain,
+        )
+    )
+
+    if existing:
+        if existing.status == "approved":
+            raise HTTPException(
+                status_code=409,
+                detail="This website is already approved for your group.",
+            )
+
+        if existing.status == "pending":
+            raise HTTPException(
+                status_code=409,
+                detail="This website is already awaiting approval.",
+            )
+
+        # Allow a rejected website to be proposed again.
+        existing.status = "pending"
+        existing.proposed_by = user.id
+        existing.reviewed_by = None
+        existing.reviewed_at = None
+        existing.created_at = datetime.now(timezone.utc)
+
+        db.commit()
+        db.refresh(existing)
+
+        return study_site_json(existing, db)
+
+    site = GroupStudySite(
+        group_id=group_id,
+        domain=domain,
+        proposed_by=user.id,
+        status="pending",
+    )
+
+    db.add(site)
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=409,
+            detail="This website has already been submitted.",
+        )
+
+    db.refresh(site)
+
+    return study_site_json(site, db)
+
+
+@app.get("/groups/{group_id}/study-sites")
+def list_group_study_sites(
+    group_id: int,
+    status: Optional[str] = Query(
+        default=None,
+        pattern="^(pending|approved|rejected)$",
+    ),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    query = select(GroupStudySite).where(
+        GroupStudySite.group_id == group_id
+    )
+
+    if status:
+        query = query.where(
+            GroupStudySite.status == status
+        )
+
+    sites = db.scalars(
+        query.order_by(
+            GroupStudySite.created_at.desc()
+        )
+    ).all()
+
+    return [
+        study_site_json(site, db)
+        for site in sites
+    ]
+
+
+@app.post("/groups/{group_id}/study-sites/{site_id}/approve")
+def approve_study_site(
+    group_id: int,
+    site_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    site = db.scalar(
+        select(GroupStudySite).where(
+            GroupStudySite.id == site_id,
+            GroupStudySite.group_id == group_id,
+        )
+    )
+
+    if site is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Study site not found.",
+        )
+
+    if site.proposed_by == user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot approve your own website proposal.",
+        )
+
+    if site.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"This website is already {site.status}.",
+        )
+
+    site.status = "approved"
+    site.reviewed_by = user.id
+    site.reviewed_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(site)
+
+    return {
+        "message": "Website approved successfully.",
+        "site": study_site_json(site, db),
+    }
+
+
+@app.post("/groups/{group_id}/study-sites/{site_id}/reject")
+def reject_study_site(
+    group_id: int,
+    site_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    workspace_group(
+        group_id,
+        user,
+        db,
+    )
+
+    site = db.scalar(
+        select(GroupStudySite).where(
+            GroupStudySite.id == site_id,
+            GroupStudySite.group_id == group_id,
+        )
+    )
+
+    if site is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Study site not found.",
+        )
+
+    if site.proposed_by == user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot reject your own website proposal.",
+        )
+
+    if site.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"This website is already {site.status}.",
+        )
+
+    site.status = "rejected"
+    site.reviewed_by = user.id
+    site.reviewed_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(site)
+
+    return {
+        "message": "Website rejected.",
+        "site": study_site_json(site, db),
+    }
 
 
 # ============================================================
@@ -1899,6 +2246,7 @@ def website_sync(
 ):
     saved = 0
     expired = 0
+    unapproved = 0
 
     for item in items:
         workspace_group(
@@ -1920,15 +2268,28 @@ def website_sync(
 
             continue
 
-        host = re.sub(
-            r"^https?://",
-            "",
-            item.domain.strip(),
-            flags=re.IGNORECASE,
-        ).split("/")[0].lower()
-
-        if not host or "." not in host:
+        try:
+            host = normalize_study_domain(item.domain)
+        except HTTPException:
             continue
+
+        # Group website tracking requires an approved site.
+        # Personal sessions without a group retain existing behavior.
+        if item.group_id is not None:
+            approved_site = db.scalar(
+                select(GroupStudySite.id).where(
+                    GroupStudySite.group_id == item.group_id,
+                    GroupStudySite.status == "approved",
+                    (
+                        (GroupStudySite.domain == host)
+                        | host.endswith("." + GroupStudySite.domain)
+                    ),
+                )
+            )
+
+            if approved_site is None:
+                unapproved += 1
+                continue
 
         started = aware_datetime(item.startedAt)
         ended = aware_datetime(item.endedAt)
@@ -1949,6 +2310,7 @@ def website_sync(
             user_id=user.id,
             group_id=item.group_id,
             topic=item.subject.strip() or "General",
+            domain=host,
             duration_seconds=item.durationSeconds,
             started_at=started,
             ended_at=ended,
@@ -1965,6 +2327,7 @@ def website_sync(
     return {
         "saved": saved,
         "expired": expired,
+        "unapproved": unapproved,
     }
 
 
@@ -2286,7 +2649,6 @@ def dashboard(
 
     sessions = db.scalars(query).all()
 
-    # Dashboard calendar dates use IST.
     today = india_today()
 
     week_start = today - timedelta(days=6)
@@ -2413,8 +2775,6 @@ def leaderboard(
             detail="Group not found.",
         )
 
-    # Save any completed rounds/months that may not have been
-    # processed by the background task yet.
     finalize_completed_rounds(
         group,
         db,
@@ -2480,7 +2840,6 @@ def finalize_period(
             detail="Only the group creator can finalize a competition period.",
         )
 
-    # This endpoint finalizes the previous completed month.
     current_month_start, _ = month_for(
         india_today()
     )
@@ -2595,7 +2954,6 @@ def round_winners(
             detail="Group not found.",
         )
 
-    # Ensure all completed rounds are saved before returning history.
     finalize_completed_rounds(
         group,
         db,
