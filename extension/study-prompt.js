@@ -16,6 +16,7 @@
   if (!domain) return;
 
   const CREATE_NEW_TOPIC = "__studytrack_create_new_topic__";
+  const LOGO_POSITION_KEY = "studyTrackFloatingLogoPosition";
 
   const host = document.createElement("div");
   host.id = "studytrack-study-prompt-host";
@@ -41,6 +42,8 @@
         position: fixed;
         right: 18px;
         bottom: 18px;
+        left: auto;
+        top: auto;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -53,12 +56,23 @@
         color: #fff;
         box-shadow: 0 4px 18px #0004;
         font: 700 20px Arial, sans-serif;
-        cursor: pointer;
+        cursor: grab;
         pointer-events: auto;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        transition: box-shadow 0.15s ease, background 0.15s ease;
       }
 
       .logo:hover {
         background: #185abc;
+        box-shadow: 0 6px 22px #0005;
+      }
+
+      .logo.dragging {
+        cursor: grabbing;
+        box-shadow: 0 8px 26px #0006;
+        transition: none;
       }
 
       .card {
@@ -256,7 +270,8 @@
     </style>
 
     <button class="logo hidden" type="button"
-      title="Open StudyTrack" aria-label="Open StudyTrack">S</button>
+      title="Drag to move • Click to open StudyTrack"
+      aria-label="Move or open StudyTrack">S</button>
 
     <section class="card hidden" aria-label="StudyTrack controls">
       <div class="header">
@@ -342,6 +357,170 @@
   let clockInterval = null;
   let refreshInterval = null;
 
+  // --------------------------------------------------
+  // DRAGGABLE FLOATING LOGO
+  // --------------------------------------------------
+
+  let logoPosition = null;
+  let pointerStartX = 0;
+  let pointerStartY = 0;
+  let logoStartX = 0;
+  let logoStartY = 0;
+  let dragging = false;
+  let movedDuringPointer = false;
+  let suppressNextClick = false;
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function getDefaultLogoPosition() {
+    return {
+      x: Math.max(12, window.innerWidth - 66),
+      y: Math.max(12, window.innerHeight - 66)
+    };
+  }
+
+  function clampLogoPosition(position) {
+    const maxX = Math.max(8, window.innerWidth - 56);
+    const maxY = Math.max(8, window.innerHeight - 56);
+
+    return {
+      x: clamp(Number(position?.x) || 0, 8, maxX),
+      y: clamp(Number(position?.y) || 0, 8, maxY)
+    };
+  }
+
+  function applyLogoPosition(position) {
+    logoPosition = clampLogoPosition(position);
+
+    logo.style.left = `${logoPosition.x}px`;
+    logo.style.top = `${logoPosition.y}px`;
+    logo.style.right = "auto";
+    logo.style.bottom = "auto";
+  }
+
+  function saveLogoPosition() {
+    if (!logoPosition) return;
+
+    try {
+      chrome.storage.local.set({
+        [LOGO_POSITION_KEY]: logoPosition
+      });
+    } catch (error) {
+      console.warn("StudyTrack: Could not save floating icon position.", error);
+    }
+  }
+
+  function restoreLogoPosition() {
+    const fallback = getDefaultLogoPosition();
+
+    try {
+      chrome.storage.local.get([LOGO_POSITION_KEY], result => {
+        if (chrome.runtime.lastError) {
+          applyLogoPosition(fallback);
+          return;
+        }
+
+        const saved = result?.[LOGO_POSITION_KEY];
+        applyLogoPosition(saved || fallback);
+      });
+    } catch {
+      applyLogoPosition(fallback);
+    }
+  }
+
+  function startLogoDrag(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+
+    pointerStartX = event.clientX;
+    pointerStartY = event.clientY;
+
+    const rect = logo.getBoundingClientRect();
+
+    logoStartX = rect.left;
+    logoStartY = rect.top;
+
+    dragging = true;
+    movedDuringPointer = false;
+
+    try {
+      logo.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is optional.
+    }
+  }
+
+  function moveLogo(event) {
+    if (!dragging) return;
+
+    const deltaX = event.clientX - pointerStartX;
+    const deltaY = event.clientY - pointerStartY;
+
+    if (
+      Math.abs(deltaX) > 5 ||
+      Math.abs(deltaY) > 5
+    ) {
+      movedDuringPointer = true;
+    }
+
+    if (!movedDuringPointer) return;
+
+    logo.classList.add("dragging");
+
+    applyLogoPosition({
+      x: logoStartX + deltaX,
+      y: logoStartY + deltaY
+    });
+  }
+
+  function stopLogoDrag(event) {
+    if (!dragging) return;
+
+    dragging = false;
+    logo.classList.remove("dragging");
+
+    try {
+      if (event?.pointerId !== undefined &&
+          logo.hasPointerCapture(event.pointerId)) {
+        logo.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Ignore unsupported pointer capture.
+    }
+
+    if (movedDuringPointer) {
+      saveLogoPosition();
+      suppressNextClick = true;
+
+      // Avoid treating the end of a drag as a click.
+      setTimeout(() => {
+        suppressNextClick = false;
+      }, 250);
+    }
+  }
+
+  logo.addEventListener("pointerdown", startLogoDrag);
+
+  logo.addEventListener("pointermove", moveLogo);
+
+  logo.addEventListener("pointerup", stopLogoDrag);
+
+  logo.addEventListener("pointercancel", stopLogoDrag);
+
+  window.addEventListener("resize", () => {
+    if (!logoPosition) return;
+
+    applyLogoPosition(logoPosition);
+    saveLogoPosition();
+  });
+
+  restoreLogoPosition();
+
+  // --------------------------------------------------
+  // GENERAL UI HELPERS
+  // --------------------------------------------------
+
   function setStatus(message, isError = false) {
     status.textContent = message;
     status.classList.toggle("error", isError);
@@ -350,6 +529,10 @@
   function showLogo() {
     card.classList.add("hidden");
     logo.classList.remove("hidden");
+
+    if (!logoPosition) {
+      applyLogoPosition(getDefaultLogoPosition());
+    }
   }
 
   function showCard() {
@@ -399,8 +582,6 @@
     return response;
   }
 
-  // All action-button disabled states are managed in one place.
-  // This prevents a successful action from leaving the other button disabled.
   function updateControls() {
     const isActive = Boolean(
       activeSession && activeSession.hostname === domain
@@ -421,6 +602,10 @@
     busy = value;
     updateControls();
   }
+
+  // --------------------------------------------------
+  // TOPIC MANAGEMENT
+  // --------------------------------------------------
 
   async function loadTopics(preferredTopic) {
     const response = await sendMessage({
@@ -524,21 +709,36 @@
     );
   });
 
+  // --------------------------------------------------
+  // RENDER TRACKING STATE
+  // --------------------------------------------------
+
   function renderState() {
     const isActive = Boolean(
       activeSession && activeSession.hostname === domain
     );
+
     const isPending = Boolean(
       pendingSite &&
-      String(pendingSite.status || pendingSite.approval_status || "pending").toLowerCase() === "pending"
+      String(
+        pendingSite.status ||
+        pendingSite.approval_status ||
+        "pending"
+      ).toLowerCase() === "pending"
     );
+
     const isListed = Boolean(siteConfig);
 
     timer.classList.toggle("hidden", !isActive && !stoppedSession);
     sessionLabel.classList.toggle("hidden", !isActive && !stoppedSession);
 
     stopButton.classList.toggle("hidden", !isActive);
-    removeButton.classList.toggle("hidden", !isListed || Boolean(siteConfig?.groupId));
+
+    removeButton.classList.toggle(
+      "hidden",
+      !isListed || Boolean(siteConfig?.groupId)
+    );
+
     startButton.classList.toggle("hidden", isActive || isPending);
     addButton.classList.toggle("hidden", isListed || isPending);
 
@@ -560,7 +760,9 @@
       notNowButton.textContent = "Minimize";
 
       if (!busy) {
-        setStatus("Approval pending. This website will be available for group tracking after another member approves it.");
+        setStatus(
+          "Approval pending. This website will be available for group tracking after another member approves it."
+        );
       }
     } else if (isListed) {
       cardMode = "listed";
@@ -595,7 +797,11 @@
     updateControls();
   }
 
-    async function refreshState() {
+  // --------------------------------------------------
+  // REFRESH BACKEND / EXTENSION STATE
+  // --------------------------------------------------
+
+  async function refreshState() {
     if (refreshInProgress) return;
 
     refreshInProgress = true;
@@ -624,6 +830,10 @@
     }
   }
 
+  // --------------------------------------------------
+  // INITIALIZATION
+  // --------------------------------------------------
+
   async function initialize() {
     setBusy(true);
 
@@ -647,7 +857,7 @@
 
       renderState();
 
-      if (activeSession || siteConfig) {
+      if (activeSession || siteConfig || pendingSite) {
         showLogo();
       } else {
         showCard();
@@ -661,7 +871,13 @@
     }
   }
 
+  // --------------------------------------------------
+  // FLOATING LOGO CLICK
+  // --------------------------------------------------
+
   logo.addEventListener("click", async () => {
+    if (suppressNextClick) return;
+
     showCard();
     setBusy(true);
 
@@ -669,7 +885,9 @@
       await refreshState();
 
       await loadTopics(
-        activeSession?.subject || siteConfig?.subject || topicSelect.value
+        activeSession?.subject ||
+        siteConfig?.subject ||
+        topicSelect.value
       );
 
       renderState();
@@ -686,6 +904,10 @@
   notNowButton.addEventListener("click", () => {
     showLogo();
   });
+
+  // --------------------------------------------------
+  // START STUDY SESSION
+  // --------------------------------------------------
 
   startButton.addEventListener("click", async () => {
     if (busy) return;
@@ -716,6 +938,10 @@
       updateControls();
     }
   });
+
+  // --------------------------------------------------
+  // ADD WEBSITE TO STUDY LIST
+  // --------------------------------------------------
 
   addButton.addEventListener("click", async () => {
     if (busy) return;
@@ -762,6 +988,10 @@
     }
   });
 
+  // --------------------------------------------------
+  // STOP STUDY SESSION
+  // --------------------------------------------------
+
   stopButton.addEventListener("click", async () => {
     if (busy) return;
 
@@ -789,6 +1019,10 @@
       updateControls();
     }
   });
+
+  // --------------------------------------------------
+  // REMOVE WEBSITE FROM PERSONAL STUDY LIST
+  // --------------------------------------------------
 
   removeButton.addEventListener("click", async () => {
     if (busy) return;
@@ -820,6 +1054,10 @@
     }
   });
 
+  // --------------------------------------------------
+  // START APP
+  // --------------------------------------------------
+
   initialize();
 
   // Keep the timer moving locally while a session is running.
@@ -834,4 +1072,5 @@
   refreshInterval = setInterval(() => {
     refreshState();
   }, 3000);
+
 })();
