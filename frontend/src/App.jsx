@@ -200,11 +200,11 @@ function StreakCalendar({ days = [], streak = 0 }) {
           {cells.map((day) => day.blank
             ? <span className="streak-cell streak-cell-blank" key={day.key} aria-hidden="true" />
             : <span
-                className={`streak-cell level-${level(day.seconds)}`}
-                key={day.key}
-                title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
-                aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
-              />)}
+              className={`streak-cell level-${level(day.seconds)}`}
+              key={day.key}
+              title={`${formatDate(day.date)} · ${formatDuration(day.seconds)}`}
+              aria-label={`${formatDate(day.date)}: ${formatDuration(day.seconds)} study time`}
+            />)}
         </div>
       </div>
     </section>
@@ -1567,32 +1567,32 @@ export default function App() {
 
               {studySitesLoading ? <div className="table-loading"><LoaderCircle className="spin" size={22} /> Loading shared sites...</div>
                 : studySites.length === 0 ? <EmptyState icon={Globe2} title="No shared sites yet" description="Suggest the first study website for your group." />
-                : <div className="study-site-list">
-                  {studySites.map((site) => {
-                    const isProposer = String(site.proposed_by) === String(profile.id);
-                    const status = String(site.status || "pending").toLowerCase();
-                    const statusIcon = status === "approved" ? CircleCheck : status === "rejected" ? CircleX : Clock4;
-                    const StatusIcon = statusIcon;
-                    return <article className="study-site-card" key={site.id}>
-                      <div className="study-site-card-icon"><Globe2 size={19} /></div>
-                      <div className="study-site-card-main">
-                        <strong>{site.domain}</strong>
-                        <span>Suggested by {isProposer ? "you" : (site.proposed_by_name || "a group member")}</span>
-                        {site.reviewed_by_name && <small>Reviewed by {site.reviewed_by_name}</small>}
-                      </div>
-                      <span className={`study-site-status status-${status}`}><StatusIcon size={14} />{status}</span>
-                      {status === "pending" && !isProposer && <div className="study-site-review-actions">
-                        <button className="site-approve-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "approve")} title="Approve site">
-                          {studySiteBusyId === site.id ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Approve
-                        </button>
-                        <button className="site-reject-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "reject")} title="Reject site">
-                          <X size={15} /> Reject
-                        </button>
-                      </div>}
-                      {status === "pending" && isProposer && <span className="study-site-awaiting">Waiting for another member</span>}
-                    </article>;
-                  })}
-                </div>}
+                  : <div className="study-site-list">
+                    {studySites.map((site) => {
+                      const isProposer = String(site.proposed_by) === String(profile.id);
+                      const status = String(site.status || "pending").toLowerCase();
+                      const statusIcon = status === "approved" ? CircleCheck : status === "rejected" ? CircleX : Clock4;
+                      const StatusIcon = statusIcon;
+                      return <article className="study-site-card" key={site.id}>
+                        <div className="study-site-card-icon"><Globe2 size={19} /></div>
+                        <div className="study-site-card-main">
+                          <strong>{site.domain}</strong>
+                          <span>Suggested by {isProposer ? "you" : (site.proposed_by_name || "a group member")}</span>
+                          {site.reviewed_by_name && <small>Reviewed by {site.reviewed_by_name}</small>}
+                        </div>
+                        <span className={`study-site-status status-${status}`}><StatusIcon size={14} />{status}</span>
+                        {status === "pending" && !isProposer && <div className="study-site-review-actions">
+                          <button className="site-approve-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "approve")} title="Approve site">
+                            {studySiteBusyId === site.id ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />} Approve
+                          </button>
+                          <button className="site-reject-button" disabled={studySiteBusyId === site.id} onClick={() => reviewStudySite(site, "reject")} title="Reject site">
+                            <X size={15} /> Reject
+                          </button>
+                        </div>}
+                        {status === "pending" && isProposer && <span className="study-site-awaiting">Waiting for another member</span>}
+                      </article>;
+                    })}
+                  </div>}
               <div className="study-sites-policy"><ShieldCheck size={17} /><span>Only approved websites can contribute browser-tracked sessions to this group. Approval is shared with all group members.</span></div>
             </>}
           </section>}
@@ -1866,10 +1866,16 @@ export default function App() {
               contentEditable={!noteReadOnly} suppressContentEditableWarning
               role="textbox" aria-label="Page content" aria-multiline="true"
               data-placeholder="Start writing your notes here..."
-              onInput={(event) => setNoteForm((current) => ({
-                ...current,
-                content: sanitizeNoteHtml(event.currentTarget.innerHTML),
-              }))}
+              onInput={(event) => {
+                const content = sanitizeNoteHtml(
+                  event.currentTarget?.innerHTML ?? ""
+                );
+
+                setNoteForm((current) => ({
+                  ...current,
+                  content,
+                }));
+              }}
             />
             <p className="small">Select any text and choose <strong>Highlight</strong> to mark important points in yellow.</p>
 
