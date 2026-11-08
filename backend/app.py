@@ -2984,12 +2984,13 @@ def group_activity_today(
         member["sessions_count"] += 1
         total_seconds += seconds
 
-        topic_key = (topic_name, domain_name)
+        # Aggregate by topic name only. Multiple short sessions, domains, or
+        # browser visits for the same topic become one combined daily total.
+        topic_key = topic_name.casefold()
         topic = member["topics"].setdefault(
             topic_key,
             {
                 "topic": topic_name,
-                "domain": domain_name,
                 "total_seconds": 0,
                 "sessions_count": 0,
             },
@@ -3014,7 +3015,7 @@ def group_activity_today(
     for member in members.values():
         topic_list = sorted(
             member["topics"].values(),
-            key=lambda item: (-item["total_seconds"], item["topic"].lower(), item["domain"].lower()),
+            key=lambda item: (-item["total_seconds"], item["topic"].lower()),
         )
         member["topics"] = topic_list
         member_list.append(member)

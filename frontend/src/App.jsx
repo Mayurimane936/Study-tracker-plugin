@@ -162,7 +162,7 @@ function StatCard({ title, value, subtitle, icon: Icon, tone }) {
 
 function GroupActivityWidget({ activity, loading, error, updatedAt, groupName, onRefresh }) {
   const members = activity?.members || [];
-  const recent = activity?.recent_activity || [];
+  const topicCount = members.reduce((total, member) => total + (member.topics?.length || 0), 0);
 
   return (
     <>
@@ -197,15 +197,6 @@ function GroupActivityWidget({ activity, loading, error, updatedAt, groupName, o
         .group-member-topic-copy span { display:block; color:#a09caf; font-size:10px; margin-top:2px; }
         .group-member-topic time { color:#66608f; font-size:10px; font-weight:700; white-space:nowrap; }
         .group-member-no-activity { color:#aaa6b7; font-size:11px; padding:10px 0 2px; }
-        .group-recent-list { display:grid; gap:0; }
-        .group-recent-item { display:flex; align-items:center; gap:11px; padding:11px 2px; border-top:1px solid #f0eef6; }
-        .group-recent-icon { width:32px; height:32px; border-radius:10px; flex:0 0 32px; display:grid; place-items:center; color:#6d5bd0; background:#f2efff; }
-        .group-recent-copy { min-width:0; flex:1; }
-        .group-recent-copy strong { display:block; color:#48435f; font-size:11px; }
-        .group-recent-copy span { display:block; margin-top:3px; color:#9692a5; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .group-recent-meta { text-align:right; white-space:nowrap; }
-        .group-recent-meta strong { display:block; color:#5f54a3; font-size:11px; }
-        .group-recent-meta span { display:block; color:#a19daf; font-size:10px; margin-top:3px; }
         .group-activity-empty { border:1px dashed #ded9ef; border-radius:13px; padding:24px 14px; text-align:center; color:#8e8aa2; font-size:12px; }
         .group-activity-error { margin-top:12px; color:#bd4758; background:#fff4f5; border-radius:9px; padding:10px 12px; font-size:12px; }
         @media(max-width:720px) { .group-member-grid { grid-template-columns:1fr; } .group-activity-stats { gap:7px; } .group-activity-stat { padding:11px; } .group-activity-stat strong { font-size:17px; } }
@@ -230,7 +221,7 @@ function GroupActivityWidget({ activity, loading, error, updatedAt, groupName, o
         <div className="group-activity-stats">
           <div className="group-activity-stat"><span>Total group study time</span><strong>{formatDuration(activity?.total_seconds || 0)}</strong></div>
           <div className="group-activity-stat"><span>Members studied</span><strong>{activity?.active_members_count ?? 0} / {activity?.members_count ?? 0}</strong></div>
-          <div className="group-activity-stat"><span>Sessions completed</span><strong>{activity?.sessions_count ?? 0}</strong></div>
+          <div className="group-activity-stat"><span>Topic totals</span><strong>{topicCount}</strong></div>
         </div>
 
         <div className="group-activity-section-title">
@@ -245,13 +236,13 @@ function GroupActivityWidget({ activity, loading, error, updatedAt, groupName, o
                 <article className="group-member-card" key={member.user_id}>
                   <div className="group-member-top">
                     <span className="group-member-avatar">{getInitials(member.name)}</span>
-                    <div className="group-member-name"><strong>{member.name}</strong><span>{member.sessions_count} session{member.sessions_count === 1 ? "" : "s"} today</span></div>
+                    <div className="group-member-name"><strong>{member.name}</strong><span>{member.topics?.length || 0} topic{member.topics?.length === 1 ? "" : "s"} studied today</span></div>
                     <strong className="group-member-total">{formatDuration(member.total_seconds)}</strong>
                   </div>
                   <div className="group-member-topics">
                     {member.topics?.length ? member.topics.map((topic, index) => (
                       <div className="group-member-topic" key={`${member.user_id}-${topic.topic}-${topic.domain}-${index}`}>
-                        <div className="group-member-topic-copy"><strong>{topic.topic}</strong><span>{topic.domain || "General"} · {topic.sessions_count} session{topic.sessions_count === 1 ? "" : "s"}</span></div>
+                        <div className="group-member-topic-copy"><strong>{topic.topic}</strong><span>Combined time across all study blocks</span></div>
                         <time>{formatDuration(topic.total_seconds)}</time>
                       </div>
                     )) : <div className="group-member-no-activity">No study sessions recorded today yet.</div>}
@@ -260,21 +251,8 @@ function GroupActivityWidget({ activity, loading, error, updatedAt, groupName, o
               ))}
             </div>}
 
-        <div className="group-activity-section-title" style={{ marginTop: 22 }}>
-          <h3>Recent group activity</h3>
-          <span>Latest completed sessions</span>
-        </div>
-        {recent.length ? <div className="group-recent-list">
-          {recent.slice(0, 8).map((item) => (
-            <div className="group-recent-item" key={item.id}>
-              <span className="group-recent-icon"><BookOpen size={15} /></span>
-              <div className="group-recent-copy"><strong>{item.member_name} · {item.topic}</strong><span>{item.domain || "General"} · {item.site_title || "Study session"}</span></div>
-              <div className="group-recent-meta"><strong>{formatDuration(item.duration_seconds)}</strong><span>{formatTime(item.started_at)}</span></div>
-            </div>
-          ))}
-        </div> : <div className="group-activity-empty">Completed group sessions will appear here as members finish and sync their study sessions.</div>}
         <p style={{ margin: "12px 0 0", color: "#9995a8", fontSize: 10 }}>
-          Activity refreshes every 15 seconds. Browser-tracked sessions appear after they are completed and synced.
+          Activity refreshes every 15 seconds. All completed sessions are combined into one total per topic for each member.
         </p>
       </section>
     </>
