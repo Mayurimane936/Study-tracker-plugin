@@ -63,9 +63,9 @@ function apiErrorMessage(detail, fallback) {
 // Allow only simple formatting tags in saved note content. This keeps rich-text
 // highlights while preventing scripts, event handlers, and unsafe attributes.
 function sanitizeNoteHtml(value = "") {
-  const parser = new DOMParser();
-  const documentNode = parser.parseFromString(`<div>${String(value)}</div>`, "text/html");
-  const root = documentNode.body.firstElementChild;
+  const template = document.createElement("template");
+  template.innerHTML = String(value ?? "");
+  const root = template.content;
   const allowedTags = new Set(["B", "STRONG", "I", "EM", "U", "MARK", "BR", "P", "DIV", "UL", "OL", "LI"]);
 
   function clean(node) {
@@ -75,10 +75,9 @@ function sanitizeNoteHtml(value = "") {
         child.remove();
         continue;
       }
-      // execCommand commonly creates a styled span for highlighting. Convert
-      // only spans with a background color into semantic <mark> elements.
+      // Convert background-colored spans into semantic highlight elements.
       if (child.tagName === "SPAN" && child.style.backgroundColor) {
-        const mark = documentNode.createElement("mark");
+        const mark = document.createElement("mark");
         mark.append(...child.childNodes);
         child.replaceWith(mark);
         continue;
@@ -93,7 +92,7 @@ function sanitizeNoteHtml(value = "") {
   }
 
   clean(root);
-  return root.innerHTML;
+  return template.innerHTML;
 }
 
 const navigation = [
@@ -1026,6 +1025,15 @@ export default function App() {
   }
 
   const noteSelectionRangeRef = useRef(null);
+  const noteContentEditorRef = useRef(null);
+
+  // Populate the editor only when a note is opened or switched. Do not bind
+  // dangerouslySetInnerHTML to every render: typing updates React state and
+  // rewriting the editable DOM on each keystroke can move the caret or break input.
+  useEffect(() => {
+    if (!showNoteForm || !noteContentEditorRef.current) return;
+    noteContentEditorRef.current.innerHTML = sanitizeNoteHtml(noteForm.content);
+  }, [showNoteForm, noteForm.id]);
 
   function rememberNoteSelection(event) {
     // Keep the editor selection when the toolbar receives the mouse click.
@@ -1858,11 +1866,10 @@ export default function App() {
             </div>
 
             <label htmlFor="note-content-editor">Page content</label>
-            <div id="note-content-editor" className="note-content-editor"
+            <div id="note-content-editor" ref={noteContentEditorRef} className="note-content-editor"
               contentEditable={!noteReadOnly} suppressContentEditableWarning
               role="textbox" aria-label="Page content" aria-multiline="true"
               data-placeholder="Start writing your notes here..."
-              dangerouslySetInnerHTML={{ __html: sanitizeNoteHtml(noteForm.content) }}
               onInput={(event) => setNoteForm((current) => ({
                 ...current,
                 content: sanitizeNoteHtml(event.currentTarget.innerHTML),
