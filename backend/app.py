@@ -2298,6 +2298,12 @@ def session_json(session: StudySession):
         "site_url": session.site_url,
         "site_title": session.site_title,
         "group_id": session.group_id,
+        # Only sessions entered through the dashboard's manual form have
+        # neither a sync source ID nor a website URL.
+        "is_manual": (
+            session.source_session_id is None
+            and session.site_url is None
+        ),
     }
 
 
@@ -2552,6 +2558,43 @@ def list_sessions(
         session_json(session)
         for session in db.scalars(query).all()
     ]
+
+
+@app.delete("/sessions/{session_id}")
+def delete_manual_session(
+    session_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Delete only a manually entered dashboard session.
+
+    Website-tracked sessions and extension-synced sessions have a source
+    session ID and/or a website URL, so they cannot be deleted through
+    this endpoint.
+    """
+    session = db.scalar(
+        select(StudySession).where(
+            StudySession.id == session_id,
+            StudySession.user_id == user.id,
+            StudySession.source_session_id.is_(None),
+            StudySession.site_url.is_(None),
+        )
+    )
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Manual study session not found or cannot be deleted.",
+        )
+
+    db.delete(session)
+    db.commit()
+
+    return {
+        "success": True,
+        "deleted_session_id": session_id,
+    }
 
 
 # ============================================================

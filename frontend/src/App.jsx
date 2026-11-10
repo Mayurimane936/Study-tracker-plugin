@@ -381,7 +381,7 @@ function sessionDomain(session) {
   }
 }
 
-function GroupedSessions({ sessions, loading }) {
+function GroupedSessions({ sessions, loading, onDelete, deletingSessionId }) {
   if (loading && sessions.length === 0) {
     return <div className="table-loading"><LoaderCircle className="spin" size={22} /> Loading sessions...</div>;
   }
@@ -434,7 +434,38 @@ function GroupedSessions({ sessions, loading }) {
                 <strong>{session.site_title || session.site_url || "Study session"}</strong>
                 <span>{formatDate(session.started_at)} · {formatTime(session.started_at)}</span>
               </div>
-              <strong className="duration-value">{formatDuration(session.duration_seconds)}</strong>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                <strong className="duration-value">{formatDuration(session.duration_seconds)}</strong>
+                {session.is_manual && (
+                  <button
+                    type="button"
+                    title="Delete manually added study time"
+                    aria-label={`Delete manually added session ${session.site_title || session.topic || ""}`}
+                    disabled={deletingSessionId === session.id || deletingSessionId !== null}
+                    onClick={() => onDelete(session)}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 5,
+                      border: "1px solid #f0d9dc",
+                      borderRadius: 8,
+                      background: "#fff7f7",
+                      color: "#bd4758",
+                      padding: "7px 9px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: deletingSessionId !== null ? "wait" : "pointer",
+                      opacity: deletingSessionId !== null ? 0.55 : 1,
+                    }}
+                  >
+                    {deletingSessionId === session.id
+                      ? <LoaderCircle size={13} className="spin" />
+                      : <Trash2 size={13} />}
+                    Delete
+                  </button>
+                )}
+              </div>
             </article>)}
           </div>
         </details>)}
@@ -590,6 +621,7 @@ export default function App() {
     startTime: "09:00", hours: "0", minutes: "30",
   });
   const [manualSessionError, setManualSessionError] = useState("");
+  const [deletingSessionId, setDeletingSessionId] = useState(null);
   const [showManualDomainForm, setShowManualDomainForm] = useState(false);
   const [manualDomainName, setManualDomainName] = useState("");
   const [manualDomainError, setManualDomainError] = useState("");
@@ -1405,6 +1437,42 @@ export default function App() {
     }
   }
 
+  async function deleteManualSession(session) {
+    if (!session?.is_manual || !session.id || deletingSessionId !== null) return;
+
+    const activityName = session.site_title || session.topic || "this study session";
+    const shouldDelete = window.confirm(
+      `Delete "${activityName}" (${formatDuration(session.duration_seconds)})? This cannot be undone.`
+    );
+    if (!shouldDelete) return;
+
+    setDeletingSessionId(session.id);
+    setError("");
+    setNotice("");
+
+    try {
+      const response = await apiFetch(
+        profile.token,
+        `/sessions/${session.id}`,
+        { method: "DELETE" }
+      );
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          apiErrorMessage(result.detail, "Couldn't delete this manual study session.")
+        );
+      }
+
+      setNotice("Manual study session deleted. Your study totals have been updated.");
+      await loadDashboard();
+    } catch (err) {
+      setError(err.message || "Couldn't delete this manual study session.");
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }
+
   async function cleanupOldSessions() {
     if (!window.confirm("Delete your study sessions older than 90 days? Notes and monthly winners will be kept.")) return;
     try {
@@ -1650,7 +1718,12 @@ export default function App() {
               </div>
             </div>
             <SearchBox value={search} onChange={setSearch} />
-            <GroupedSessions sessions={filteredSessions} loading={loading} />
+            <GroupedSessions
+              sessions={filteredSessions}
+              loading={loading}
+              onDelete={deleteManualSession}
+              deletingSessionId={deletingSessionId}
+            />
           </section>}
 
           {activePage === "notes" && <section className="panel page-panel">
